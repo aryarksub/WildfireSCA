@@ -32,6 +32,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs):
 
     config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}.yaml')
     plots_dir = os.path.join(PLOTS_DIR, f'{prefix}_{suffix}')
+    os.makedirs(plots_dir, exist_ok=True)
     
     with open(log_file, 'w') as f:
         sys.stdout = f
@@ -44,6 +45,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs):
             data_cfg=cfg["data"],
             device=device,
             model_backbone=backbone,
+            num_states=num_states,
         )
 
         train_losses = []

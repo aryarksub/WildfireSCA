@@ -84,6 +84,7 @@ def get_training_objects(
     rank: int = 0,
     world_size: int = 1,
     model_backbone: str = 'logistic',
+    num_states: int = 3,
 ):
     dataset, loader = build_onestep_loader(
         base_path=data_cfg["base_path"],
@@ -184,7 +185,7 @@ def get_training_objects(
         )
 
     if model_backbone == 'logistic':
-        model = DirectLogisticSCA(n_covariates).to(device)
+        model = DirectLogisticSCA(n_covariates, num_states=num_states).to(device)
     # elif model_backbone == 'mlp':
     #     model = MLPSCA(n_covariates).to(device)
     else:
