@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, DistributedSampler, Subset
 import yaml
 
 from data import build_onestep_loader
-from models import MLPSCA, DirectLogisticSCA
+from models import MLPSCA, DirectLogisticSCA, HazardLogisticSCA
 
 FORCED_TEST_EVENT_IDS = []
 
@@ -83,6 +83,7 @@ def get_training_objects(
     distributed: bool = False,
     rank: int = 0,
     world_size: int = 1,
+    model_type: str = 'direct',
     model_backbone: str = 'logistic',
     num_states: int = 3,
 ):
@@ -109,6 +110,7 @@ def get_training_objects(
     # print(example.keys(), file=sys.__stdout__)
     # print(len(dataset), example['x_fire'].sum().item(), example['y'].sum().item(), file=sys.__stdout__)
     n_covariates = example["x_all"].shape[0] - 1
+    n_static = example["x_static"].shape[0] if "x_static" in example else 0
     # print('Number of x fire:', example['x_fire'].shape, file=sys.__stdout__)
     # print('Number of x hourly:', example['x_hourly'].shape, file=sys.__stdout__)
     # print('Number of x static:', example['x_static'].shape, file=sys.__stdout__)
@@ -185,7 +187,12 @@ def get_training_objects(
         )
 
     if model_backbone == 'logistic':
-        model = DirectLogisticSCA(n_covariates, num_states=num_states).to(device)
+        if model_type == 'direct':
+            model = DirectLogisticSCA(n_covariates, num_states=num_states).to(device)
+        elif model_type == 'hazard':
+            model = HazardLogisticSCA(n_covariates, num_static=n_static, num_states=num_states).to(device)
+        else:
+            raise ValueError(f"Unsupported model_type={model_type} for model_backbone={model_backbone}")
     elif model_backbone == 'mlp':
         model = MLPSCA(n_covariates, num_states=num_states).to(device)
     else:

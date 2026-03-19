@@ -44,6 +44,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs):
         train_loader, val_loader, test_loader, model, optimizer = get_training_objects(
             data_cfg=cfg["data"],
             device=device,
+            model_type=model_type,
             model_backbone=backbone,
             num_states=num_states,
         )

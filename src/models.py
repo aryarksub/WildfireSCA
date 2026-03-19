@@ -115,6 +115,190 @@ class DirectLogisticSCA(nn.Module):
         else:
             raise ValueError(f"Unsupported num_states={self.num_states}")
 
+class HazardLogisticSCA(nn.Module):
+    """
+    Hazard-based SCA model with hourly hazards aggregated over 12 hours.
+
+    Matches theoretical formulation:
+        p_ign = 1 - ∏ (1 - λ_k)
+        p_burn = 1 - ∏ (1 - μ_k)
+
+    Supports 3-state model:
+        U -> {U, B, E}
+        B -> {B, E}
+        E -> E
+    """
+
+    def __init__(self, n_covariates, num_static, num_states=3, T=12):
+        super().__init__()
+
+        self.num_states = num_states
+        self.T = T  # number of hourly steps
+        self.num_static = num_static # number of static variables/layers
+        
+        # infer hourly dimension
+        self.n_hourly_total = n_covariates - num_static
+        assert self.n_hourly_total % T == 0, f"Hourly covariates must be divisible by T={T}"
+        self.C_per_hour = self.n_hourly_total // T
+        self.C = self.C_per_hour + num_static
+
+        # -----------------------------
+        # Ignition hazard (U -> B)
+        # -----------------------------
+        self.alpha0 = nn.Parameter(torch.tensor([-2.0]))  # low base hazard
+        self.alpha1 = nn.Parameter(torch.zeros(1))
+        self.beta = nn.Parameter(torch.zeros(self.C))
+
+        if num_states == 3:
+            # -----------------------------
+            # Burnout hazard (B -> E)
+            # -----------------------------
+            self.gamma0 = nn.Parameter(torch.tensor([-1.0]))
+            self.gamma = nn.Parameter(torch.zeros(self.C))
+
+            # -----------------------------
+            # Direct extinguish hazard (U -> E)
+            # -----------------------------
+            self.delta0 = nn.Parameter(torch.tensor([-3.0]))  # very rare
+            self.delta1 = nn.Parameter(torch.zeros(1))
+            self.eta = nn.Parameter(torch.zeros(self.C))
+
+    # ============================================================
+    # Helper: split covariates
+    # ============================================================
+
+    def split_covariates(self, covariates):
+        """
+        covariates: (B, C_total, H, W)
+
+        returns:
+            cov_seq: (B, T, C_per_hour + num_static, H, W)
+        """
+
+        B, C, H, W = covariates.shape
+
+        # -----------------------------
+        # Split hourly vs static
+        # -----------------------------
+        hourly = covariates[:, :self.n_hourly_total]   # (B, C_hourly_total, H, W)
+        static = covariates[:, self.n_hourly_total:]   # (B, num_static, H, W)
+
+        # -----------------------------
+        # Reshape hourly → (B, T, C_per_hour, H, W)
+        # -----------------------------
+        hourly = hourly.view(B, self.T, self.C_per_hour, H, W)
+
+        # -----------------------------
+        # Broadcast static → (B, T, num_static, H, W)
+        # -----------------------------
+        static = static.unsqueeze(1)                   # (B,1,num_static,H,W)
+        static = static.expand(-1, self.T, -1, -1, -1)
+
+        # -----------------------------
+        # Concatenate
+        # -----------------------------
+        cov_seq = torch.cat([hourly, static], dim=2)
+
+        return cov_seq
+
+    # ============================================================
+    # Helper: stable hazard aggregation
+    # ============================================================
+
+    def aggregate_hazard(self, hazard):
+        """
+        hazard: (B, T, 1, H, W)
+
+        returns:
+            p = 1 - prod(1 - hazard)
+        computed in log-space for stability
+        """
+        log_survival = torch.sum(torch.log(1 - hazard + 1e-8), dim=1)
+        return 1 - torch.exp(log_survival)
+
+    # ============================================================
+    # Forward
+    # ============================================================
+
+    def forward(self, x):
+
+        state = x[:, 0:1]          # (B,1,H,W)
+        covariates = x[:, 1:]      # (B,C,H,W)
+
+        # Neighborhood feature (constant over 12h)
+        N_B = compute_neighbor_burning(state) / 8.0
+
+        # Split into hourly covariates
+        cov_seq = self.split_covariates(covariates)  # (B,T,C,H,W)
+
+        B, T, C, H, W = cov_seq.shape
+
+        # =========================================================
+        # Ignition hazard λ_k
+        # =========================================================
+
+        # (B,T,1,H,W)
+        linear_ign = (cov_seq * self.beta.view(1,1,-1,1,1)).sum(dim=2, keepdim=True)
+
+        z_ign = (
+            self.alpha0
+            + self.alpha1 * N_B.unsqueeze(1)
+            + linear_ign
+        )
+
+        lambda_k = torch.sigmoid(z_ign)
+
+        p_UB = self.aggregate_hazard(lambda_k)
+
+        # =========================================================
+        # TWO-STATE CASE
+        # =========================================================
+        if self.num_states == 2:
+            return p_UB
+
+        # =========================================================
+        # Burnout hazard μ_k
+        # =========================================================
+
+        linear_burn = (cov_seq * self.gamma.view(1,1,-1,1,1)).sum(dim=2, keepdim=True)
+
+        z_burn = self.gamma0 + linear_burn
+        mu_k = torch.sigmoid(z_burn)
+
+        p_BE = self.aggregate_hazard(mu_k)
+
+        # =========================================================
+        # Direct extinguish hazard η_k
+        # =========================================================
+
+        linear_ext = (cov_seq * self.eta.view(1,1,-1,1,1)).sum(dim=2, keepdim=True)
+
+        z_ext = (
+            self.delta0
+            + self.delta1 * N_B.unsqueeze(1)
+            + linear_ext
+        )
+
+        eta_k = torch.sigmoid(z_ext)
+
+        p_UE = self.aggregate_hazard(eta_k)
+
+        # =========================================================
+        # Normalize U transitions
+        # =========================================================
+
+        total = p_UB + p_UE
+
+        p_UU = torch.clamp(1 - total, min=1e-6)
+
+        # Optional normalization (keeps strict simplex)
+        Z = p_UU + p_UB + p_UE
+        p_UU = p_UU / Z
+        p_UB = p_UB / Z
+        p_UE = p_UE / Z
+
+        return p_UU, p_UB, p_UE, p_BE
+
 
 # ============================================================
 # MLP SCA Model
