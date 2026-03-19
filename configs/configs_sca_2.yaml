@@ -1,0 +1,43 @@
+seed: 123
+
+data:
+  base_path: temp_cubes
+  batch_size: 32
+  shuffle: true
+  num_workers: 6
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  target_var: fire_spread/burned_state_combined
+  step_hours: 12
+  horizon_hours: 12
+  hourly_agg: concat
+  missing_value: -1.0
+  compute_stats: false
+  stats_path: src/ml/normalization_sca.json
+  stats_sample_limit: null
+  required_vars:
+    - fire_spread/burned_state_combined
+    - fuel_topo/adj
+    - fuel_topo/cbd
+    - fuel_topo/cbh
+    - fuel_topo/cc
+    - fuel_topo/ch
+    - high_res_climate/lh
+    - high_res_climate/lw
+    - high_res_climate/m1
+    - high_res_climate/m10
+    - high_res_climate/m100
+    - high_res_climate/wd
+    - high_res_climate/ws
+    - landfire/evt
+    - landfire/fbfm13
+    - landfire/fbfm40
+    - landfire/roads
+    - landfire/asp
+    - landfire/elev
+    - landfire/slpd
+    - low_res_climate/t2m
+    - low_res_climate/d2m
+    - low_res_climate/sp
+    - low_res_climate/tp

@@ -1,6 +1,10 @@
 # Local copies of fire data
 temp_cubes/
 
+# Plots and results
+plots/
+results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
