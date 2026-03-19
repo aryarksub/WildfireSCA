@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, DistributedSampler, Subset
 import yaml
 
 from data import build_onestep_loader
-from models import DirectLogisticSCA
+from models import MLPSCA, DirectLogisticSCA
 
 FORCED_TEST_EVENT_IDS = []
 
@@ -186,8 +186,8 @@ def get_training_objects(
 
     if model_backbone == 'logistic':
         model = DirectLogisticSCA(n_covariates, num_states=num_states).to(device)
-    # elif model_backbone == 'mlp':
-    #     model = MLPSCA(n_covariates).to(device)
+    elif model_backbone == 'mlp':
+        model = MLPSCA(n_covariates, num_states=num_states).to(device)
     else:
         raise ValueError(f"Unsupported model_backbone={model_backbone}")
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

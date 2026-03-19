@@ -114,3 +114,84 @@ class DirectLogisticSCA(nn.Module):
 
         else:
             raise ValueError(f"Unsupported num_states={self.num_states}")
+
+
+# ============================================================
+# MLP SCA Model
+# ============================================================
+
+class MLPSCA(nn.Module):
+    def __init__(self, n_covariates, hidden_dim=32, num_states=3):
+        super().__init__()
+        self.num_states = num_states
+
+        in_dim = n_covariates + 1  # covariates + neighbor burning fraction
+
+        # Shared ignition backbone
+        self.ignite_backbone = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, 1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            nn.ReLU(),
+        )
+
+        if self.num_states == 3:
+            # U -> {U, B, E}
+            self.ignite_head = nn.Conv2d(hidden_dim, 3, 1) # logits for UU, UB, UE
+            # Initial bias towards remaining unburned
+            self.ignite_head.bias.data = torch.tensor([5.0, -3.0, -4.0])
+
+            # B -> E
+            self.burnout_mlp = nn.Sequential(
+                nn.Conv2d(n_covariates, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, 1, 1),
+            )
+            # Initial bias towards extinguishing (BE)
+            self.burnout_mlp[-1].bias.data.fill_(-0.5)
+
+        else:  # 2-state
+            # U -> B
+            self.ignite_head = nn.Conv2d(hidden_dim, 1, 1)
+            # Initial bias towards remaining unburned
+            self.ignite_head.bias.data.fill_(-4.0)
+
+    def forward(self, x):
+        """
+        x: (B, C_total, H, W)
+
+        Channel 0 = burned_state at time t
+        Channels 1: = covariates at time t
+        """
+        state = x[:, 0:1]
+        covariates = x[:, 1:]
+
+        # Neighbor burning fraction
+        N_B = compute_neighbor_burning(state) / 8.0
+
+        features = torch.cat([covariates, N_B], dim=1)
+
+        # Shared backbone
+        h = self.ignite_backbone(features)
+
+        logits = self.ignite_head(h)
+
+        if self.num_states == 2:
+            # U -> B
+            p_ignite = torch.sigmoid(logits)
+            return p_ignite
+
+        else:
+            # U -> {U, B, E}
+            U_probs = torch.softmax(logits, dim=1)
+            p_UU = U_probs[:, 0:1]
+            p_UB = U_probs[:, 1:2]
+            p_UE = U_probs[:, 2:3]
+
+            # B -> E
+            burnout_logit = self.burnout_mlp(covariates)
+            p_BE = torch.sigmoid(burnout_logit)
+
+            return p_UU, p_UB, p_UE, p_BE
