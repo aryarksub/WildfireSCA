@@ -7,17 +7,17 @@ import sys
 # Neighbor Burning Count
 # ============================================================
 
-def compute_neighbor_burning(state):
+def compute_neighbor_burning(state, radius=1):
     """
     state: (B,1,H,W) with values {0,1,2}
     """
     print('Computing neighbor burning count...', file=sys.__stdout__)
     burning = (state == 1).float()
 
-    kernel = torch.ones(1, 1, 3, 3, device=state.device)
+    kernel = torch.ones(1, 1, 2*radius+1, 2*radius+1, device=state.device)
     kernel[0, 0, 1, 1] = 0  # exclude center cell
 
-    neighbor_count = F.conv2d(burning, kernel, padding=1)
+    neighbor_count = F.conv2d(burning, kernel, padding=radius)
 
     return neighbor_count
 
@@ -28,10 +28,11 @@ def compute_neighbor_burning(state):
 
 class DirectLogisticSCA(nn.Module):
 
-    def __init__(self, n_covariates, num_states=3):
+    def __init__(self, n_covariates, num_states=3, radius=1):
         super().__init__()
 
         self.num_states = num_states
+        self.radius = radius
 
         # --- Shared ignition (U -> *) ---
         self.alpha0 = nn.Parameter(torch.tensor([-1.0]))
@@ -54,7 +55,8 @@ class DirectLogisticSCA(nn.Module):
         covariates = x[:, 1:]
 
         # Neighbor feature
-        N_B = compute_neighbor_burning(state) / 8.0
+        num_neighbors = (2 * self.radius + 1) ** 2 - 1
+        N_B = compute_neighbor_burning(state, radius=self.radius) / num_neighbors
 
         # Shared linear term helper
         def linear_term(weights):
@@ -129,12 +131,13 @@ class HazardLogisticSCA(nn.Module):
         E -> E
     """
 
-    def __init__(self, n_covariates, num_static, num_states=3, T=12):
+    def __init__(self, n_covariates, num_static, num_states=3, T=12, radius=1):
         super().__init__()
 
         self.num_states = num_states
         self.T = T  # number of hourly steps
         self.num_static = num_static # number of static variables/layers
+        self.radius = radius
         
         # infer hourly dimension
         self.n_hourly_total = n_covariates - num_static
@@ -226,7 +229,8 @@ class HazardLogisticSCA(nn.Module):
         covariates = x[:, 1:]      # (B,C,H,W)
 
         # Neighborhood feature (constant over 12h)
-        N_B = compute_neighbor_burning(state) / 8.0
+        num_neighbors = (2 * self.radius + 1) ** 2 - 1
+        N_B = compute_neighbor_burning(state, radius=self.radius) / num_neighbors
 
         # Split into hourly covariates
         cov_seq = self.split_covariates(covariates)  # (B,T,C,H,W)
@@ -305,9 +309,10 @@ class HazardLogisticSCA(nn.Module):
 # ============================================================
 
 class MLPSCA(nn.Module):
-    def __init__(self, n_covariates, hidden_dim=32, num_states=3):
+    def __init__(self, n_covariates, hidden_dim=32, num_states=3, radius=1):
         super().__init__()
         self.num_states = num_states
+        self.radius = radius
 
         in_dim = n_covariates + 1  # covariates + neighbor burning fraction
 
@@ -353,7 +358,8 @@ class MLPSCA(nn.Module):
         covariates = x[:, 1:]
 
         # Neighbor burning fraction
-        N_B = compute_neighbor_burning(state) / 8.0
+        num_neighbors = (2 * self.radius + 1) ** 2 - 1
+        N_B = compute_neighbor_burning(state, radius=self.radius) / num_neighbors
 
         features = torch.cat([covariates, N_B], dim=1)
 
@@ -379,3 +385,177 @@ class MLPSCA(nn.Module):
             p_BE = torch.sigmoid(burnout_logit)
 
             return p_UU, p_UB, p_UE, p_BE
+        
+class HazardMLPSCA(nn.Module):
+    """
+    MLP-based hazard SCA model.
+
+    - Applies MLP per hour
+    - Aggregates hazards over T=12
+    """
+
+    def __init__(self, n_covariates, num_static, hidden_dim=32, num_states=3, T=12, radius=1):
+        super().__init__()
+
+        self.num_states = num_states
+        self.T = T
+        self.num_static = num_static
+        self.radius = radius
+
+        # -----------------------------
+        # Infer per-hour structure
+        # -----------------------------
+        self.n_hourly_total = n_covariates - num_static
+        assert self.n_hourly_total % T == 0, f"Hourly covariates must be divisible by T={T}"
+
+        self.C_per_hour = self.n_hourly_total // T
+        self.C = self.C_per_hour + num_static
+
+        # +1 for neighbor feature
+        in_dim_ignite = self.C + 1
+        in_dim_burn = self.C
+
+        # =========================================================
+        # Ignition hazard MLP (shared across time)
+        # =========================================================
+        self.ignite_mlp = nn.Sequential(
+            nn.Conv2d(in_dim_ignite, hidden_dim, 1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim, 1, 1),
+        )
+
+        # Bias → low ignition initially
+        self.ignite_mlp[-1].bias.data.fill_(-2.0)
+
+        if num_states == 3:
+
+            # =====================================================
+            # Burnout hazard MLP
+            # =====================================================
+            self.burnout_mlp = nn.Sequential(
+                nn.Conv2d(in_dim_burn, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, 1, 1),
+            )
+            self.burnout_mlp[-1].bias.data.fill_(-1.0)
+
+            # =====================================================
+            # Direct extinguish (U -> E)
+            # =====================================================
+            self.extinguish_mlp = nn.Sequential(
+                nn.Conv2d(in_dim_ignite, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, hidden_dim, 1),
+                nn.ReLU(),
+                nn.Conv2d(hidden_dim, 1, 1),
+            )
+            self.extinguish_mlp[-1].bias.data.fill_(-3.0)
+
+    # =========================================================
+    # Split covariates
+    # =========================================================
+
+    def split_covariates(self, covariates):
+        B, C, H, W = covariates.shape
+
+        hourly = covariates[:, :self.n_hourly_total]
+        static = covariates[:, self.n_hourly_total:]
+
+        hourly = hourly.view(B, self.T, self.C_per_hour, H, W)
+
+        static = static.unsqueeze(1).expand(-1, self.T, -1, -1, -1)
+
+        cov_seq = torch.cat([hourly, static], dim=2)
+
+        return cov_seq  # (B,T,C,H,W)
+
+    # =========================================================
+    # Hazard aggregation
+    # =========================================================
+
+    def aggregate_hazard(self, hazard):
+        log_survival = torch.sum(torch.log(1 - hazard + 1e-8), dim=1)
+        return 1 - torch.exp(log_survival)
+
+    # =========================================================
+    # Forward
+    # =========================================================
+
+    def forward(self, x):
+
+        state = x[:, 0:1]
+        covariates = x[:, 1:]
+
+        # Neighborhood (constant across time)
+        num_neighbors = (2 * self.radius + 1) ** 2 - 1
+        N_B = compute_neighbor_burning(state, radius=self.radius) / num_neighbors
+
+        cov_seq = self.split_covariates(covariates)  # (B,T,C,H,W)
+
+        B, T, C, H, W = cov_seq.shape
+
+        # =====================================================
+        # Prepare inputs per hour
+        # =====================================================
+
+        N_B_seq = N_B.unsqueeze(1).expand(-1, T, -1, -1, -1)
+
+        ignite_input = torch.cat([cov_seq, N_B_seq], dim=2)  # (B,T,C+1,H,W)
+
+        # Merge batch + time for conv
+        def merge_time(x):
+            return x.view(B*T, x.shape[2], H, W)
+
+        def unmerge_time(x):
+            return x.view(B, T, 1, H, W)
+
+        # =====================================================
+        # Ignition hazard λ_k
+        # =====================================================
+
+        ignite_flat = merge_time(ignite_input)
+        lambda_k = torch.sigmoid(self.ignite_mlp(ignite_flat))
+        lambda_k = unmerge_time(lambda_k)
+
+        p_UB = self.aggregate_hazard(lambda_k)
+
+        if self.num_states == 2:
+            return p_UB
+
+        # =====================================================
+        # Burnout hazard μ_k
+        # =====================================================
+
+        burn_flat = merge_time(cov_seq)
+        mu_k = torch.sigmoid(self.burnout_mlp(burn_flat))
+        mu_k = unmerge_time(mu_k)
+
+        p_BE = self.aggregate_hazard(mu_k)
+
+        # =====================================================
+        # Direct extinguish η_k
+        # =====================================================
+
+        ext_flat = merge_time(ignite_input)
+        eta_k = torch.sigmoid(self.extinguish_mlp(ext_flat))
+        eta_k = unmerge_time(eta_k)
+
+        p_UE = self.aggregate_hazard(eta_k)
+
+        # =====================================================
+        # Normalize U transitions
+        # =====================================================
+
+        total = p_UB + p_UE
+        p_UU = torch.clamp(1 - total, min=1e-6)
+
+        Z = p_UU + p_UB + p_UE
+        p_UU = p_UU / Z
+        p_UB = p_UB / Z
+        p_UE = p_UE / Z
+
+        return p_UU, p_UB, p_UE, p_BE

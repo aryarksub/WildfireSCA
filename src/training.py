@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, DistributedSampler, Subset
 import yaml
 
 from data import build_onestep_loader
-from models import MLPSCA, DirectLogisticSCA, HazardLogisticSCA
+from models import MLPSCA, DirectLogisticSCA, HazardLogisticSCA, HazardMLPSCA
 
 FORCED_TEST_EVENT_IDS = []
 
@@ -86,6 +86,7 @@ def get_training_objects(
     model_type: str = 'direct',
     model_backbone: str = 'logistic',
     num_states: int = 3,
+    radius: int = 1,
 ):
     dataset, loader = build_onestep_loader(
         base_path=data_cfg["base_path"],
@@ -188,13 +189,18 @@ def get_training_objects(
 
     if model_backbone == 'logistic':
         if model_type == 'direct':
-            model = DirectLogisticSCA(n_covariates, num_states=num_states).to(device)
+            model = DirectLogisticSCA(n_covariates, num_states=num_states, radius=radius).to(device)
         elif model_type == 'hazard':
-            model = HazardLogisticSCA(n_covariates, num_static=n_static, num_states=num_states).to(device)
+            model = HazardLogisticSCA(n_covariates, num_static=n_static, num_states=num_states, radius=radius).to(device)
         else:
             raise ValueError(f"Unsupported model_type={model_type} for model_backbone={model_backbone}")
     elif model_backbone == 'mlp':
-        model = MLPSCA(n_covariates, num_states=num_states).to(device)
+        if model_type == 'direct':
+            model = MLPSCA(n_covariates, num_states=num_states, radius=radius).to(device)
+        elif model_type == 'hazard':
+            model = HazardMLPSCA(n_covariates, num_static=n_static, num_states=num_states, radius=radius).to(device)
+        else:
+            raise ValueError(f"Unsupported model_type={model_type} for model_backbone={model_backbone}")
     else:
         raise ValueError(f"Unsupported model_backbone={model_backbone}")
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

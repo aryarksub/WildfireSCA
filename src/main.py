@@ -18,16 +18,16 @@ def print_model_params(model):
         # print(f"{name}: mean={param.data.mean():.6f}, std={param.data.std():.6f}")
         print(f"{name}: {param.data}", file=sys.__stdout__)
 
-def driver(model_type, backbone, agg, num_states, weights, epochs):
+def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, weights={weights}, epochs={epochs}", file=sys.__stdout__)
+    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, weights={weights}, epochs={epochs}, radius={radius}", file=sys.__stdout__)
 
     # prefix corresponds to model configuration
     prefix = f"{model_type}_{backbone}_{agg}_{num_states}"
     # suffix corresponds to loss weights
-    suffix = '-'.join(map(str, weights)) if weights is not None else 'eq_weights'
+    suffix = ('-'.join(map(str, weights)) if weights is not None else 'eq_weights') + f"_epochs{epochs}" + f"_radius{radius}"
     log_file = os.path.join(RESULTS_DIR, f'{prefix}_sca_{suffix}.txt')
 
     config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}.yaml')
@@ -47,6 +47,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs):
             model_type=model_type,
             model_backbone=backbone,
             num_states=num_states,
+            radius=radius,
         )
 
         train_losses = []
@@ -170,6 +171,13 @@ if __name__=='__main__':
         help="Number of training epochs (default: 10)."
     )
 
+    parser.add_argument(
+        "--radius",
+        type=int,
+        default=1,
+        help="Radius for neighborhood computation (default: 1)."
+    )
+
     args = parser.parse_args()
 
     # --- parse weights into list of floats ---
@@ -178,4 +186,4 @@ if __name__=='__main__':
     else:
         args.weights = None
 
-    driver(args.model_type, args.backbone, args.agg, args.num_states, args.weights, args.epochs)
+    driver(args.model_type, args.backbone, args.agg, args.num_states, args.weights, args.epochs, args.radius)
