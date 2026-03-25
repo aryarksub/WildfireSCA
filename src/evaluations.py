@@ -134,7 +134,7 @@ def build_transition_probs(x, model_outputs, num_states):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, num_states, weights=None):
+def evaluate(model, loader, device, num_states, train_weights=None, cost_matrix=None):
     print('Evaluating...', file=sys.__stdout__)
 
     model.eval()
@@ -170,9 +170,19 @@ def evaluate(model, loader, device, num_states, weights=None):
         P = build_transition_probs(x, outputs, num_states)
 
         # Choose most likely next state
-        pred = torch.argmax(P, dim=1, keepdim=True)
+        if cost_matrix is not None:
+            C = cost_matrix.to(P.device)
 
-        loss = loss_fn(model, batch, device, weights=weights)
+            P_exp = P.unsqueeze(2)                 # (B,K,1,H,W)
+            C_exp = C.view(1, num_states, num_states, 1, 1)
+
+            expected_cost = (P_exp * C_exp).sum(dim=1)  # (B,K,H,W)
+
+            pred = torch.argmin(expected_cost, dim=1, keepdim=True)
+        else:
+            pred = torch.argmax(P, dim=1, keepdim=True)
+
+        loss = loss_fn(model, batch, device, weights=train_weights)
 
         total_loss += loss.item()
         total_pixels += y.numel()
@@ -237,7 +247,7 @@ def evaluate(model, loader, device, num_states, weights=None):
     )
 
 @torch.no_grad()
-def predict_states(model, loader, device, num_states):
+def predict_states(model, loader, device, num_states, cost_matrix=None):
 
     model.eval()
 
@@ -256,7 +266,17 @@ def predict_states(model, loader, device, num_states):
 
         P = build_transition_probs(x, outputs, num_states)
 
-        pred = torch.argmax(P, dim=1, keepdim=True)
+        if cost_matrix is not None:
+            C = cost_matrix.to(P.device)
+
+            P_exp = P.unsqueeze(2)                 # (B,K,1,H,W)
+            C_exp = C.view(1, num_states, num_states, 1, 1)
+
+            expected_cost = (P_exp * C_exp).sum(dim=1)  # (B,K,H,W)
+
+            pred = torch.argmin(expected_cost, dim=1, keepdim=True)
+        else:
+            pred = torch.argmax(P, dim=1, keepdim=True)
 
         state = x[:, 0:1]
 

@@ -3,6 +3,7 @@ import os
 import torch
 import argparse
 from pathlib import Path
+import re
 
 from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, predict_states
 from plots import plot_metrics, plot_multiple
@@ -18,16 +19,135 @@ def print_model_params(model):
         # print(f"{name}: mean={param.data.mean():.6f}, std={param.data.std():.6f}")
         print(f"{name}: {param.data}", file=sys.__stdout__)
 
-def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
+def parse_train_weights(arg, num_states, train_loader=None):
+    """
+    Returns list of weights for transitions
+    """
+    # Case 1: manual weights
+    if "," in arg:
+        return [float(w) for w in arg.split(",")]
+
+    # Case 2: predefined schemes
+    if arg.startswith("invtrans"):
+        assert train_loader is not None, "Need train_loader to compute frequencies"
+
+        match = re.search(r"invtrans(_noclamp)?([-+]?\d*\.?\d+)?", arg)
+        if match:
+            clamp = not (match.group(1) is not None)
+            alpha = float(match.group(2)) if match.group(2) is not None else 0.5
+        else:
+            clamp = True
+            alpha = 0.5
+
+        freq = torch.zeros(num_states, num_states, dtype=torch.long)
+
+        for batch in train_loader:
+            x = batch["x_all"]
+            y = batch["y"].long().view(-1)
+
+            state = x[:, 0:1].long().view(-1)
+
+            # Flatten pair indices into 1D
+            indices = state * num_states + y
+
+            # Count occurrences
+            counts = torch.bincount(indices, minlength=num_states * num_states)
+
+            # Reshape back to matrix and accumulate
+            freq += counts.view(num_states, num_states)
+
+        # print(freq, file=sys.__stdout__)
+
+        freq = freq + 1 # add-one smoothing to avoid division by zero
+        freq = freq.float()
+
+        # mask for valid transitions
+        mask = freq > 1
+
+        # initialize weights
+        weights = torch.zeros_like(freq)
+
+        # inverse frequency only where valid
+        weights[mask] = 1.0 / (freq[mask] ** alpha)
+
+        # normalize ONLY over valid entries (mean normalization instead of sum normalization for stability/robustness)
+        weights[mask] = weights[mask] / weights[mask].mean()
+
+        if clamp:
+            weights[mask] = torch.clamp(weights[mask], 0.1, 10.0) # clip extreme weights in between 0.1 and 10
+        
+        # print(weights, file=sys.__stdout__)
+
+        # flatten into expected format
+        if num_states == 3:
+            # [UU, UB, UE, BB, BE]
+            return [
+                weights[0,0].item(),
+                weights[0,1].item(),
+                weights[0,2].item(),
+                weights[1,1].item(),
+                weights[1,2].item()
+            ]
+        elif num_states == 2:
+            return [
+                weights[0,0].item(),
+                weights[0,1].item()
+            ]
+        
+    # Case 3: equal weights
+    if arg == "equal":
+        return [1,1,1,1,1] if num_states == 3 else [1,1]
+
+    raise ValueError(f"Unknown train_weights option: {arg}")
+
+def parse_cost_matrix(arg, num_states):
+    """
+    Returns (num_states x num_states) tensor
+    """
+
+    # C[i,j] = cost of predicting j when true state is i
+
+    # Case 1: manual matrix
+    if "," in arg:
+        values = [float(x) for x in arg.split(",")]
+        C = torch.tensor(values).view(num_states, num_states)
+        return C
+
+    # Case 2: predefined
+    if arg == "uniform":
+        C = torch.ones(num_states, num_states)
+        C.fill_diagonal_(0)
+        return C
+
+    if arg == "default" or arg == "wildfire":
+        if num_states == 3:
+            return torch.tensor([
+                [0, 2, 1],  # true U: predicting U is 0 cost, B is worst (2), E is bad (1)
+                [50, 0, 35], # true B: predicting B is 0 cost, U is worst (50), E is bad (35)
+                [5, 2, 0]   # true E: predicting E is 0 cost, U is worst (5), B is bad (2)
+            ]).float()
+        elif num_states == 2:
+            return torch.tensor([
+                [0, 1], # true U: predicting U is 0 cost, B is bad (1)
+                [5, 0]  # true B: predicting B is 0 cost, U is bad (5)
+            ]).float()
+
+    raise ValueError(f"Unknown cost_matrix option: {arg}")
+
+def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix_arg, epochs, radius):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, weights={weights}, epochs={epochs}, radius={radius}", file=sys.__stdout__)
+    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, train_weights={train_weights_arg}, cost_matrix={cost_matrix_arg}, epochs={epochs}, radius={radius}", file=sys.__stdout__)
 
     # prefix corresponds to model configuration
     prefix = f"{model_type}_{backbone}_{agg}_{num_states}"
     # suffix corresponds to loss weights
-    suffix = ('-'.join(map(str, weights)) if weights is not None else 'eq_weights') + f"_epochs{epochs}" + f"_radius{radius}"
+    suffix = (
+        f"tw_{train_weights_arg or 'none'}_"
+        f"cm_{cost_matrix_arg or 'none'}_"
+        f"epochs{epochs}_radius{radius}"
+    )
     log_file = os.path.join(RESULTS_DIR, f'{prefix}_sca_{suffix}.txt')
 
     config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}.yaml')
@@ -50,6 +170,17 @@ def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
             radius=radius,
         )
 
+        train_weights = parse_train_weights(
+            train_weights_arg,
+            num_states,
+            train_loader
+        )
+
+        cost_matrix = parse_cost_matrix(
+            cost_matrix_arg,
+            num_states
+        )
+
         train_losses = []
         val_losses = []
         val_accs = []
@@ -65,9 +196,9 @@ def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
             for batch in train_loader:
                 print(f"Processing batch {num_batches+1}...", file=sys.__stdout__)
                 if num_states == 3:
-                    loss = compute_loss_three_state(model, batch, device, weights=weights)
+                    loss = compute_loss_three_state(model, batch, device, weights=train_weights)
                 elif num_states == 2:
-                    loss = compute_loss_two_state(model, batch, device, weights=weights)
+                    loss = compute_loss_two_state(model, batch, device, weights=train_weights)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -83,7 +214,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
             print(f"Epoch {epoch+1:02d} | "
                 f"Train Loss: {avg_train_loss:.4f}")
 
-            val_loss, val_overall_acc, val_state_acc, val_prec, val_rec, val_iou, val_brier = evaluate(model, val_loader, device, num_states, weights=weights)
+            val_loss, val_overall_acc, val_state_acc, val_prec, val_rec, val_iou, val_brier = evaluate(model, val_loader, device, num_states, train_weights, cost_matrix)
             val_losses.append(val_loss)
             val_accs.append(val_overall_acc)
             val_state_accs.append(val_state_acc)
@@ -113,7 +244,7 @@ def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
 
         print("\nFinal Test Evaluation")
 
-        test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate(model, test_loader, device, num_states, weights=weights)
+        test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate(model, test_loader, device, num_states, train_weights, cost_matrix)
 
         print(f"Test Loss: {test_loss:.4f}")
         print(f"Test Acc: {test_overall_acc:.4f} | "
@@ -123,14 +254,14 @@ def driver(model_type, backbone, agg, num_states, weights, epochs, radius):
               f"Test IoU: {test_iou.tolist()} | "
               f"Test Brier: {test_brier:.4f}")
 
-        preds, gts, states = predict_states(model, test_loader, device, num_states)
+        preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
         plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred')
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Model configuration")
 
     parser.add_argument(
-        "--model_type",
+        "--model_type", "--type", "--mt",
         type=str,
         default="direct",
         help="Type of model (direct, hazard)"
@@ -151,28 +282,35 @@ if __name__=='__main__':
     )
 
     parser.add_argument(
-        "--num_states",
+        "--num_states", "--states", "--ns",
         type=int,
         default=3,
         help="Number of states (2, 3)"
     )
 
     parser.add_argument(
-        "--weights",
+        "--train_weights", "--tw",
         type=str,
-        default="",
-        help="Comma-separated weights (e.g. '1,1,1,1,1'). For no weights, pass empty string."
+        default="equal",
+        help="Training weights: 'invtrans' or comma-separated list"
     )
 
     parser.add_argument(
-        "--epochs",
+        "--cost_matrix", "--cm",
+        type=str,
+        default="uniform",
+        help="Cost matrix: 'wildfire', 'uniform', or comma-separated list"
+    )
+
+    parser.add_argument(
+        "--epochs", "--ep",
         type=int,
         default=10,
         help="Number of training epochs (default: 10)."
     )
 
     parser.add_argument(
-        "--radius",
+        "--radius", "--r",
         type=int,
         default=1,
         help="Radius for neighborhood computation (default: 1)."
@@ -180,10 +318,4 @@ if __name__=='__main__':
 
     args = parser.parse_args()
 
-    # --- parse weights into list of floats ---
-    if args.weights:
-        args.weights = [float(w) for w in args.weights.split(",")]
-    else:
-        args.weights = None
-
-    driver(args.model_type, args.backbone, args.agg, args.num_states, args.weights, args.epochs, args.radius)
+    driver(args.model_type, args.backbone, args.agg, args.num_states, args.train_weights, args.cost_matrix, args.epochs, args.radius)
