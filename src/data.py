@@ -269,6 +269,7 @@ class GeoTiffDatasetStructured(Dataset):
 
         T, H, W = fperim.shape
         burned = torch.zeros((T, H, W), dtype=torch.float32)
+        ever_burned = torch.zeros((H, W), dtype=torch.bool)
 
         for t in range(T):
             perim = fperim[t]
@@ -278,8 +279,19 @@ class GeoTiffDatasetStructured(Dataset):
             active = (line > 0) | (new > 0)
             inside = (perim > 0)
 
-            burned[t][active] = 1
-            burned[t][inside & ~active] = 2
+            # Prevent reignition: once extinguished, cannot become active again
+            # If reignition should be possible, remove this if-block
+            if t > 0:
+                was_extinguished = burned[t-1] == 2
+                active = active & (~was_extinguished)
+
+            # Once burned, always burned
+            ever_burned |= inside | active
+
+            # Assign states
+            burned[t][~ever_burned] = 0             # never burned
+            burned[t][active] = 1                   # currently burning
+            burned[t][ever_burned & ~active] = 2    # burned but not active
 
         var_key = "fire_spread/burned_state"
         var_entry = {
