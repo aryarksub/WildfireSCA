@@ -2,6 +2,7 @@ import os
 import glob
 import re
 import csv
+import sys
 from typing import Dict, List, Optional
 from functools import partial
 
@@ -160,12 +161,15 @@ class GeoTiffDatasetStructured(Dataset):
 
         feds_mask_full = [_as_bool(r.get("feds", False)) for r in rows]
         first_true = next(i for i, v in enumerate(feds_mask_full) if v)
+        last_true = max(i for i, v in enumerate(feds_mask_full) if v)
 
         # Align to 24 hours before the first FEDS detection.
         start_idx = max(0, first_true - 24)
-        feds_mask = feds_mask_full[start_idx:]
+        # End at the final FEDS observation (inclusive).
+        end_idx = last_true + 1
+        feds_mask = feds_mask_full[start_idx:end_idx]
         feds_true_idx = [i for i, v in enumerate(feds_mask) if v]
-        times = [r.get("time") for r in rows[start_idx:]]
+        times = [r.get("time") for r in rows[start_idx:end_idx]]
 
         info = {
             "start_idx": start_idx,
@@ -175,6 +179,7 @@ class GeoTiffDatasetStructured(Dataset):
             "times": times,
         }
         self._fire_time_cache[event_path] = info
+        # print(event_path, info["length"], info["feds_true_idx"], file=sys.__stdout__)
         return info
 
     def _slice_or_pad_dynamic(self, data: torch.Tensor, time_info: Optional[Dict]) -> torch.Tensor:
@@ -202,7 +207,7 @@ class GeoTiffDatasetStructured(Dataset):
         return torch.cat([sliced, tail], dim=0)
 
     def _expand_fire_to_hourly(self, data: torch.Tensor, time_info: Optional[Dict]) -> torch.Tensor:
-        if time_info is None or data.shape[0] <= 1:
+        if time_info is None:
             return data
 
         T_src, H, W = data.shape
@@ -239,12 +244,14 @@ class GeoTiffDatasetStructured(Dataset):
     def _apply_time_alignment(
         self, category_dir: str, data: torch.Tensor, event_time_info: Optional[Dict]
     ) -> torch.Tensor:
-        if data.ndim != 3 or data.shape[0] <= 1:
+        if data.ndim != 3:
             return data
         if event_time_info is None:
             return data
         if category_dir == "fire_spread":
             return self._expand_fire_to_hourly(data, event_time_info)
+        if data.shape[0] <= 1:
+            return data
         return self._slice_or_pad_dynamic(data, event_time_info)
 
 
@@ -373,6 +380,24 @@ class GeoTiffDatasetStructured(Dataset):
                 batch["categories"].setdefault(category_dir, {})[var_name] = var_entry
 
         self._add_burned_state(batch)
+        # for vk in batch["variables"]:
+        #     print(vk, batch["variables"][vk]["shape"], file=sys.__stdout__)
+        #     if vk == 'fire_spread/fperim' and batch["variables"][vk]["shape"][0] > 1:
+        #         print(
+        #             [
+        #                 (i, torch.all(batch["variables"][vk]["data"][i-1] == batch["variables"][vk]["data"][i]).item())
+        #                 for i in range(1, batch["variables"][vk]["shape"][0])
+        #             ],
+        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][1]).item(), 
+        #             # torch.all(batch["variables"][vk]["data"][1] == batch["variables"][vk]["data"][2]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][2] == batch["variables"][vk]["data"][3]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][11]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][12]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][13]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][23]).item(),
+        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][67]).item(),
+        #             file=sys.__stdout__
+        #         )
         return batch
 
 
