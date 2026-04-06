@@ -88,6 +88,7 @@ def get_training_objects(
     num_states: int = 3,
     radius: int = 1,
 ):
+    print(data_cfg["base_path"], file=sys.__stdout__ )
     dataset, loader = build_onestep_loader(
         base_path=data_cfg["base_path"],
         batch_size=data_cfg.get("batch_size", 8),
@@ -107,19 +108,26 @@ def get_training_objects(
         rank=rank,
         world_size=world_size,
     )
+
+    # for ex in range(0, min(200, len(dataset))):
+    #     example = dataset[ex]
+    #     print(example.keys(), file=sys.__stdout__)
+    #     print(len(dataset), example['x_fire'].sum().item(), example['y'].sum().item(), file=sys.__stdout__)
+    #     print(example['event_name'], example['t'], file=sys.__stdout__)
+    #     n_covariates = example["x_all"].shape[0] - 1
+    #     n_static = example["x_static"].shape[0] if "x_static" in example else 0
+    #     print('Number of x fire:', example['x_fire'].shape, file=sys.__stdout__)
+    #     print('Number of x hourly:', example['x_hourly'].shape, file=sys.__stdout__)
+    #     print('Number of x static:', example['x_static'].shape, file=sys.__stdout__)
+    #     print('Number of covariates:', n_covariates, example['x_all'].shape, file=sys.__stdout__)
+    #     print('y:', example['y'].shape, file=sys.__stdout__)
+    #     print('fire vars:', example['fire_vars'], file=sys.__stdout__)
+    #     print('hourly vars:', example['hourly_vars'], file=sys.__stdout__)
+    #     print('static vars:', example['static_vars'], file=sys.__stdout__)
+
     example = dataset[0]
-    # print(example.keys(), file=sys.__stdout__)
-    # print(len(dataset), example['x_fire'].sum().item(), example['y'].sum().item(), file=sys.__stdout__)
     n_covariates = example["x_all"].shape[0] - 1
     n_static = example["x_static"].shape[0] if "x_static" in example else 0
-    # print('Number of x fire:', example['x_fire'].shape, file=sys.__stdout__)
-    # print('Number of x hourly:', example['x_hourly'].shape, file=sys.__stdout__)
-    # print('Number of x static:', example['x_static'].shape, file=sys.__stdout__)
-    # print('Number of covariates:', n_covariates, example['x_all'].shape, file=sys.__stdout__)
-    # print('y:', example['y'].shape, file=sys.__stdout__)
-    # print('fire vars:', example['fire_vars'], file=sys.__stdout__)
-    # print('hourly vars:', example['hourly_vars'], file=sys.__stdout__)
-    # print('static vars:', example['static_vars'], file=sys.__stdout__)
 
     train_idx, val_idx, _test_idx = hardcoded_split(dataset)
     # print(_test_idx, file=sys.__stdout__)

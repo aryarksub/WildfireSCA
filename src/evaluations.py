@@ -255,6 +255,13 @@ def predict_states(model, loader, device, num_states, cost_matrix=None):
     ground_truth = []
     current_states = []
 
+    total_same = 0
+    total_pixels = 0
+    matching_batches = 0
+    total_batches = 0
+    matching_batches2 = 0
+    total_batches2 = 0
+
     for batch in loader:
 
         x = batch["x_all"].to(device)
@@ -283,5 +290,21 @@ def predict_states(model, loader, device, num_states, cost_matrix=None):
         predictions.extend(pred.squeeze(1).cpu())
         ground_truth.extend(y.squeeze(1).cpu())
         current_states.extend(state.squeeze(1).cpu())
+
+        same_as_current = (pred == state)
+        total_same += same_as_current.sum().item()
+        total_pixels += same_as_current.numel()
+
+        if torch.equal(pred, state):
+            matching_batches += 1
+        total_batches += 1
+
+        per_sample_match = (pred == state).view(pred.size(0), -1).all(dim=1)
+        matching_batches2 += per_sample_match.sum().item()
+        total_batches2 += pred.size(0)
+    
+    print(f"Percentage of predictions same as current state: {total_same / total_pixels:.4f}", total_same, total_pixels, file=sys.__stdout__)
+    print(f"Percentage of batches where all predictions match current state: {matching_batches / total_batches:.4f}", matching_batches, total_batches, file=sys.__stdout__)
+    print(f"Percentage of batches where all samples match current state: {matching_batches2 / total_batches2:.4f}", matching_batches2, total_batches2, file=sys.__stdout__)
 
     return predictions, ground_truth, current_states

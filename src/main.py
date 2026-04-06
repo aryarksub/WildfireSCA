@@ -134,11 +134,11 @@ def parse_cost_matrix(arg, num_states):
 
     raise ValueError(f"Unknown cost_matrix option: {arg}")
 
-def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix_arg, epochs, radius):
+def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix_arg, epochs, radius, imputed):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, train_weights={train_weights_arg}, cost_matrix={cost_matrix_arg}, epochs={epochs}, radius={radius}", file=sys.__stdout__)
+    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, train_weights={train_weights_arg}, cost_matrix={cost_matrix_arg}, epochs={epochs}, radius={radius}, imputed={imputed}", file=sys.__stdout__)
 
     # prefix corresponds to model configuration
     prefix = f"{model_type}_{backbone}_{agg}_{num_states}"
@@ -146,11 +146,11 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
     suffix = (
         f"tw_{train_weights_arg or 'none'}_"
         f"cm_{cost_matrix_arg or 'none'}_"
-        f"epochs{epochs}_radius{radius}"
+        f"epochs{epochs}_radius{radius}_imputed{imputed}"
     )
     log_file = os.path.join(RESULTS_DIR, f'{prefix}_sca_{suffix}.txt')
 
-    config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}.yaml')
+    config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}{"_imp" if imputed else ""}.yaml')
     plots_dir = os.path.join(PLOTS_DIR, f'{prefix}_{suffix}')
     os.makedirs(plots_dir, exist_ok=True)
     
@@ -169,6 +169,7 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
             num_states=num_states,
             radius=radius,
         )
+        print(len(train_loader), len(val_loader), len(test_loader), file=sys.__stdout__)
 
         train_weights = parse_train_weights(
             train_weights_arg,
@@ -316,6 +317,13 @@ if __name__=='__main__':
         help="Radius for neighborhood computation (default: 1)."
     )
 
+    parser.add_argument(
+        "--imputed", "--impute", "--imp",
+        action='store_true',
+        default=False,
+        help="Whether to use imputed values (default: False)."
+    )
+
     args = parser.parse_args()
 
-    driver(args.model_type, args.backbone, args.agg, args.num_states, args.train_weights, args.cost_matrix, args.epochs, args.radius)
+    driver(args.model_type, args.backbone, args.agg, args.num_states, args.train_weights, args.cost_matrix, args.epochs, args.radius, args.imputed)

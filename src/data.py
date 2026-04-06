@@ -11,6 +11,9 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 import rasterio
+from scipy.ndimage import distance_transform_edt
+import numpy as np
+from scipy.spatial import cKDTree
 
 
 DEFAULT_REQUIRED_VARS = [
@@ -327,8 +330,272 @@ class GeoTiffDatasetStructured(Dataset):
         batch["variables"][var_key_combined] = var_entry_combined
         batch["categories"].setdefault("fire_spread", {})["burned_state_combined"] = var_entry_combined
 
+    # def _distance_to_mask(self, mask: torch.Tensor) -> torch.Tensor:
+    #     inv = (~mask).cpu().numpy()
+    #     dist = distance_transform_edt(inv)
+    #     return torch.from_numpy(dist).float()
+
+    def _distance_to_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        inv = (~mask).cpu().numpy().astype(bool)
+
+        # Step 1: True pixels → distance to nearest False
+        dist = distance_transform_edt(inv)
+
+        # Step 2: False pixels → distance to nearest OTHER False
+        false_coords = np.argwhere(~inv)
+
+        if len(false_coords) <= 1:
+            dist[~inv] = np.inf
+        else:
+            tree = cKDTree(false_coords)
+            dists, _ = tree.query(false_coords, k=2)  # self + nearest other
+            nearest_other = dists[:, 1]
+
+            for coord, d in zip(false_coords, nearest_other):
+                dist[tuple(coord)] = d
+
+        return torch.from_numpy(dist).float()
+
+    def _compute_tau_interval(self, S_t, S_tp, t0, t1):
+        # print("Computing tau interval for t0 =", t0, "t1 =", t1, file=sys.__stdout__)
+        H, W = S_t.shape
+        delta_t = t1 - t0
+
+        # Mask for burning or extinguished pixels at t0 and t1
+        B_or_E_t  = (S_t  > 0)
+        B_or_E_tp = (S_tp > 0)
+
+        # Mask for extinguished pixels at t0 and t1
+        E_t  = (S_t  == 2)
+        E_tp = (S_tp == 2)
+
+        # print('Counts of burning/extinguished pixels:', B_or_E_t.sum().item(), B_or_E_tp.sum().item(), E_t.sum().item(), E_tp.sum().item(), file=sys.__stdout__)
+
+        # Estimated ignition and extinction times (initialized to inf, will be updated below)
+        tau_B = torch.full((H, W), float("inf"))
+        tau_E = torch.full((H, W), float("inf"))
+
+        # Edge case: same state at start and end (no imputation needed)
+        same_state = (S_t == S_tp)
+
+        tau_B[same_state & (S_t != 0)] = t0             # already burning, ignition time is initial time t0
+        tau_E[same_state & (S_t == 2)] = t0             # already extinguished, extinction time is initial time t0
+        tau_B[same_state & (S_t == 0)] = float("inf")   # never ignites, ignition time is inf
+        tau_E[same_state & (S_t != 2)] = float("inf")   # never extinguishes, extinction time is inf
+
+        active = ~same_state
+
+        # print('Active pixels:', active.sum().item(), file=sys.__stdout__)
+
+        # NOTE: The above handles transitions U->U, B->B, E->E
+        # NOTE: Remaining transitions need to be handled ... U->B, U->E (passing through B), B->E
+
+        # Flags describing availability of reference pixels at time t0 and t1
+        no_BE_t0 = not B_or_E_t.any()   # True if NO burning/extinguished pixels exist at initial time t0
+        has_BE_t1 = B_or_E_tp.any()     # True if ANY burning/extinguished pixels exist at end time t1
+
+        no_E_t0 = not E_t.any()         # True if NO extinguished pixels exist at initial time t0
+        has_E_t1 = E_tp.any()           # True if ANY extinguished pixels exist at end time t1
+
+        # print('Flags:', no_BE_t0, has_BE_t1, no_E_t0, has_E_t1, file=sys.__stdout__)
+
+        # Distances to nearest burning/extinguished pixel at t0 and t1 (computed only if needed)
+        # If there are B/E pixels at the start time, compute distance to initial fire front for ignition imputation
+        if not no_BE_t0:
+            d_minus = self._distance_to_mask(B_or_E_t)
+        else:
+            d_minus = None  # not used
+
+        # If there are B/E pixels at the end time, compute distance to final fire front for ignition imputation
+        if has_BE_t1:
+            d_plus = self._distance_to_mask(B_or_E_tp)
+        else:
+            d_plus = None  # not used
+
+        # If there are E pixels at the start time, compute distance to initial extinguished areas for extinction imputation
+        if not no_E_t0:
+            d_minus_E = self._distance_to_mask(E_t)
+        else:
+            d_minus_E = None
+
+        # If there are E pixels at the end time, compute distance to final extinguished areas for extinction imputation
+        if has_E_t1:
+            d_plus_E = self._distance_to_mask(E_tp)
+        else:
+            d_plus_E = None
+
+        # print(
+        #     'Distances computed:', 
+        #     (d_minus.min(), d_minus.max()) if d_minus is not None else (float('inf'), float('inf')),
+        #     (d_plus.min(), d_plus.max()) if d_plus is not None else (float('inf'), float('inf')),
+        #     (d_minus_E.min(), d_minus_E.max()) if d_minus_E is not None else (float('inf'), float('inf')),
+        #     (d_plus_E.min(), d_plus_E.max()) if d_plus_E is not None else (float('inf'), float('inf')),
+        #     file=sys.__stdout__
+        # )
+
+        # Ignition case: tau^(B)
+        tau_B[(S_t > 0) & active] = t0 # Already ignited at t0
+
+        U_to_BE = (S_t == 0) & (S_tp > 0) & active
+
+        # print('U to BE count:', U_to_BE.sum().item(), file=sys.__stdout__)
+
+        # If there are no burning/extinguished pixels at t0 but there are at t1, impute ignition time as t1 (latest ignition possible)
+        if no_BE_t0 and has_BE_t1:
+            tau_B[U_to_BE] = t1
+        # Otherwise, do ignition imputation based on distance to fire front at t0 and t1
+        else:
+            denom = d_minus + d_plus
+            denom[denom == 0] = 1e-6 # add epsilon to prevent division by zero
+            # print('U to BE imputation:', delta_t, d_minus[U_to_BE], d_plus[U_to_BE], (d_minus / denom)[U_to_BE], delta_t * (d_minus / denom)[U_to_BE], file=sys.__stdout__)
+            tau_B[U_to_BE] = t0 + delta_t * (d_minus / denom)[U_to_BE]
+
+        # print(tau_B[U_to_BE], file=sys.__stdout__)
+
+        # Extinction case: tau^(E)
+        tau_E[(S_t == 2) & active] = t0 # Already extinguished at t0
+
+        # No extinction
+        no_extinguish = (S_tp != 2) & active
+        tau_E[no_extinguish] = float("inf")
+
+        # B -> E transition
+        B_to_E = (S_t == 1) & (S_tp == 2) & active
+
+        # If there are no extinguished pixels at t0 but there are at t1, impute extinction time as t1 (latest extinction possible)
+        if no_E_t0 and has_E_t1:
+            tau_E[B_to_E] = t1
+        elif no_E_t0 and not has_E_t1:
+            tau_E[active] = float("inf") # nothing extinguishes (no E pixels at t0 or t1)
+        # Otherwise, do extinction imputation based on distance to extinguished areas at t0 and t1
+        else:
+            denom_E = d_minus_E + d_plus_E
+            denom_E[denom_E == 0] = 1e-6
+
+            tau_E[B_to_E] = t0 + delta_t * (d_minus_E / denom_E)[B_to_E]
+
+        # U -> E transition (passing through B for sequential ignition + extinction)
+        U_to_E = (S_t == 0) & (S_tp == 2) & active
+
+        # If there are no extinguished pixels at t0 but there are at t1, impute extinction time as t1 (latest extinction possible)
+        if no_E_t0 and has_E_t1:
+            tau_E[U_to_E] = t1
+        elif no_E_t0 and not has_E_t1:
+            tau_E[active] = float("inf") # nothing extinguishes (no E pixels at t0 or t1)
+        # Otherwise, do ignition imputation and then extinction imputation on top of that
+        else:
+            denom_E = d_minus_E + d_plus_E
+            denom_E[denom_E == 0] = 1e-6
+
+            tau_B_local = tau_B[U_to_E]
+            frac_E = (d_minus_E / denom_E)[U_to_E]
+
+            tau_E[U_to_E] = tau_B_local + (t1 - tau_B_local) * frac_E
+
+        # Ensure ordering tau^(B) <= tau^(E)
+        tau_E = torch.maximum(tau_E, tau_B)
+
+        return tau_B, tau_E
+    
+    def _reconstruct_states_from_tau(self, tau_B, tau_E, t0, t1):
+        delta_t = t1 - t0
+        H, W = tau_B.shape
+
+        states = torch.zeros((delta_t, H, W), dtype=torch.float32)
+
+        for k in range(delta_t):
+            t_cur = t0 + k
+
+            U = t_cur < tau_B
+            B = (tau_B <= t_cur) & (t_cur < tau_E)
+            E = t_cur >= tau_E
+
+            states[k][U] = 0
+            states[k][B] = 1
+            states[k][E] = 2
+
+        return states
+    
+    def _add_burned_state_imputed(self, batch):
+        if "fire_spread/burned_state" not in batch["variables"]:
+            return
+        # print("Adding imputed burned state variable...", file=sys.__stdout__)
+
+        burned = batch["variables"]["fire_spread/burned_state"]["data"]
+        feds_mask = batch["time_info"]["feds_mask"]
+
+        T, H, W = burned.shape
+        # TODO: Add 0 to obs_idx for blank slate of unburned pixels to start?
+        obs_idx = [i for i, v in enumerate(feds_mask) if v or i == 0]
+
+        # print(obs_idx, file=sys.__stdout__)
+
+        if len(obs_idx) < 2:
+            return
+
+        imputed = burned.clone()
+
+        for i in range(len(obs_idx) - 1):
+            t0 = obs_idx[i]
+            t1 = obs_idx[i + 1]
+
+            if t1 - t0 <= 1:
+                continue
+
+            S_t  = burned[t0]
+            S_tp = burned[t1]
+
+            tau_B, tau_E = self._compute_tau_interval(S_t, S_tp, t0, t1)
+
+            ############################################################
+            # finite_B = tau_B[torch.isfinite(tau_B)]
+            # finite_E = tau_E[torch.isfinite(tau_E)]
+
+            # if finite_B.numel() > 0:
+            #     min_B = finite_B.min()
+            #     max_B = finite_B.max()
+            #     count_B_between = ((finite_B > min_B) & (finite_B < max_B)).sum().item()
+            # else:
+            #     min_B = max_B = float('inf')
+            #     count_B_between = 0
+
+            # if finite_E.numel() > 0:
+            #     min_E = finite_E.min()
+            #     max_E = finite_E.max()
+            #     count_E_between = ((finite_E > min_E) & (finite_E < max_E)).sum().item()
+            # else:
+            #     min_E = max_E = float('inf')
+            #     count_E_between = 0
+
+            # print(
+            #     t0, t1,
+            #     'B:', min_B, max_B, 'count between:', count_B_between,
+            #     'E:', min_E, max_E, 'count between:', count_E_between,
+            #     file=sys.__stdout__
+            # )
+            #############################################################
+
+            recon = self._reconstruct_states_from_tau(tau_B, tau_E, t0, t1)
+
+            imputed[t0:t1] = recon
+            imputed[t0] = burned[t0]
+            imputed[t1] = burned[t1]
+
+        var_key = "fire_spread/burned_state_imp1"
+        var_entry = {
+            "var_name": "burned_state_imp1",
+            "category": "fire_spread",
+            "data": imputed,
+            "shape": tuple(imputed.shape),
+            "files": [],
+        }
+
+        batch["variables"][var_key] = var_entry
+        batch["categories"].setdefault("fire_spread", {})["burned_state_imp1"] = var_entry
+
     def __getitem__(self, idx):
         event_name, event_path = self.fire_events[idx]
+        # print("******* EVENT NAME:", event_name, file=sys.__stdout__)
         batch = {"event_name": event_name, "variables": {}, "categories": {}}
         event_time_info = self._load_fire_time_info(event_path)
         batch["time_info"] = {
@@ -380,24 +647,32 @@ class GeoTiffDatasetStructured(Dataset):
                 batch["categories"].setdefault(category_dir, {})[var_name] = var_entry
 
         self._add_burned_state(batch)
+        self._add_burned_state_imputed(batch)
         # for vk in batch["variables"]:
         #     print(vk, batch["variables"][vk]["shape"], file=sys.__stdout__)
-        #     if vk == 'fire_spread/fperim' and batch["variables"][vk]["shape"][0] > 1:
-        #         print(
-        #             [
-        #                 (i, torch.all(batch["variables"][vk]["data"][i-1] == batch["variables"][vk]["data"][i]).item())
-        #                 for i in range(1, batch["variables"][vk]["shape"][0])
-        #             ],
-        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][1]).item(), 
-        #             # torch.all(batch["variables"][vk]["data"][1] == batch["variables"][vk]["data"][2]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][2] == batch["variables"][vk]["data"][3]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][11]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][12]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][13]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][23]).item(),
-        #             # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][67]).item(),
-        #             file=sys.__stdout__
-        #         )
+        #     if vk == 'fire_spread/burned_state_imp1' and batch["variables"][vk]["shape"][0] > 1:
+        #         for i in range(1, batch["variables"][vk]["shape"][0]):
+        #             if not torch.all(batch["variables"][vk]["data"][i-1] == batch["variables"][vk]["data"][i]).item():
+        #                 print(
+        #                     (
+        #                         i, 
+        #                         torch.all(batch["variables"][vk]["data"][i-1] == batch["variables"][vk]["data"][i]).item(),
+        #                         # torch.bincount(batch["variables"][vk]["data"][i-1].flatten().to(torch.int64), minlength=3),
+        #                         torch.bincount(batch["variables"][vk]["data"][i].flatten().to(torch.int64), minlength=3),
+        #                         batch["variables"][vk]["data"][i-1].sum().item(),
+        #                         batch["variables"][vk]["data"][i].sum().item(),
+        #                         i % 12 != 0 and not torch.all(batch["variables"][vk]["data"][i-1] == batch["variables"][vk]["data"][i]).item()
+        #                     ),
+        #                     # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][1]).item(), 
+        #                     # torch.all(batch["variables"][vk]["data"][1] == batch["variables"][vk]["data"][2]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][2] == batch["variables"][vk]["data"][3]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][11]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][12]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][13]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][12] == batch["variables"][vk]["data"][23]).item(),
+        #                     # torch.all(batch["variables"][vk]["data"][0] == batch["variables"][vk]["data"][67]).item(),
+        #                     file=sys.__stdout__
+        #                 )
         return batch
 
 
@@ -529,9 +804,15 @@ class OneStepDatasetSimple(Dataset):
             ti = self.base._load_fire_time_info(event_path)
             T = int(ti["length"])
             mask = ti["feds_mask"]
-            for t in range(self.step, T - self.horizon, self.step):
-                if mask[t + self.horizon]:
+            # For imputation version
+            if self.step < 12:
+                for t in range(self.horizon, T - self.horizon, self.step):
                     index.append((event_idx, t))
+            # For regular version (12-hour timestep with 12-hour horizon)
+            else:
+                for t in range(self.step, T - self.horizon, self.step):
+                    if mask[t + self.horizon]:
+                        index.append((event_idx, t))
         return index
 
 
@@ -626,7 +907,12 @@ class OneStepDatasetSimple(Dataset):
             static_frames.append(frame)
         x_static = torch.stack(static_frames, dim=0)
 
-        t_y = min(t + self.horizon, T_tgt - 1)
+        # Imputation version
+        if self.step < 12:
+            t_y = min(t + self.step, T_tgt - 1)
+        # Non-imputation version
+        else:
+            t_y = min(t + self.horizon, T_tgt - 1)
         y = tgt[t_y].unsqueeze(0)
         if self.target_var.split("/")[0] in ("fire_spread"):
             y = torch.nan_to_num(y, nan=0.0)
