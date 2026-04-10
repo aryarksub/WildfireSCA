@@ -150,6 +150,7 @@ def get_training_objects(
     train_ds = Subset(dataset, train_idx)
     val_ds = Subset(dataset, val_idx)
     test_ds = Subset(dataset, _test_idx)
+    print(len(train_ds), len(val_ds), len(test_ds), file=sys.__stdout__)
     if distributed:
         train_sampler = DistributedSampler(
             train_ds, num_replicas=world_size, rank=rank, shuffle=True
@@ -195,6 +196,8 @@ def get_training_objects(
             **loader_kwargs,
         )
 
+    if model_type == 'persistent':
+        return train_loader, val_loader, test_loader, None, None
     if model_backbone == 'logistic':
         if model_type == 'direct':
             model = DirectLogisticSCA(n_covariates, num_states=num_states, radius=radius).to(device)

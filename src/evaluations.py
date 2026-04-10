@@ -308,3 +308,103 @@ def predict_states(model, loader, device, num_states, cost_matrix=None):
     print(f"Percentage of batches where all samples match current state: {matching_batches2 / total_batches2:.4f}", matching_batches2, total_batches2, file=sys.__stdout__)
 
     return predictions, ground_truth, current_states
+
+@torch.no_grad()
+def evaluate_persistent(loader, device, num_states):
+    print('Evaluating persistent baseline...', file=sys.__stdout__)
+
+    total_loss = 0.0   # no training, so default to 0
+    total_pixels = 0
+    correct = 0
+    num_batches = 0
+
+    state_correct = torch.zeros(num_states)
+    state_total = torch.zeros(num_states)
+
+    confusion = torch.zeros(num_states, num_states)
+    brier_sum = 0.0
+
+    for batch in loader:
+        x = batch["x_all"].to(device)
+        y = batch["y"].to(device).long()
+
+        # Persistent prediction
+        pred = x[:, 0:1].long()  # (B,1,H,W)
+
+        # Build one-hot deterministic "probabilities"
+        P = F.one_hot(
+            pred.squeeze(1), num_classes=num_states
+        ).permute(0, 3, 1, 2).float()       
+
+        total_pixels += y.numel()
+        correct += (pred == y).sum().item()
+        num_batches += 1
+
+        for z in range(num_states):
+            mask = (y == z)
+            state_total[z] += mask.sum().item()
+            state_correct[z] += ((pred == y) & mask).sum().item()
+
+        # Confusion matrix
+        y_flat = y.view(-1).long()
+        pred_flat = pred.view(-1).long()
+
+        indices = num_states * y_flat + pred_flat
+        cm = torch.bincount(
+            indices, minlength=num_states**2
+        ).reshape(num_states, num_states).cpu()
+
+        confusion += cm
+
+        # Brier score
+        y_onehot = F.one_hot(
+            y.squeeze(1), num_classes=num_states
+        ).permute(0, 3, 1, 2).float()
+
+        brier_sum += ((P - y_onehot) ** 2).sum().item()
+
+    # Final metrics
+    precision = torch.zeros(num_states)
+    recall = torch.zeros(num_states)
+    iou = torch.zeros(num_states)
+
+    for k in range(num_states):
+        TP = confusion[k, k]
+        FP = confusion[:, k].sum() - TP
+        FN = confusion[k, :].sum() - TP
+
+        precision[k] = TP / (TP + FP + 1e-8)
+        recall[k] = TP / (TP + FN + 1e-8)
+        iou[k] = TP / (TP + FP + FN + 1e-8)
+
+    brier = brier_sum / total_pixels
+
+    return (
+        total_loss,
+        correct / total_pixels,
+        state_correct / state_total,
+        precision,
+        recall,
+        iou,
+        brier
+    )
+
+@torch.no_grad()
+def predict_persistent(loader, device):
+    predictions = []
+    ground_truth = []
+    current_states = []
+
+    for batch in loader:
+
+        x = batch["x_all"].to(device)
+        y = batch["y"].to(device)
+
+        state = x[:, 0:1]
+        pred = state.clone()  # persistence: next state = current state
+
+        predictions.extend(pred.squeeze(1).cpu())
+        ground_truth.extend(y.squeeze(1).cpu())
+        current_states.extend(state.squeeze(1).cpu())
+
+    return predictions, ground_truth, current_states

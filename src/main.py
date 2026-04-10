@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import re
 
-from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, predict_states
+from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, evaluate_persistent, predict_persistent, predict_states
 from plots import plot_metrics, plot_multiple
 from training import get_training_objects, load_config
 
@@ -138,7 +138,10 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, train_weights={train_weights_arg}, cost_matrix={cost_matrix_arg}, epochs={epochs}, radius={radius}, imputed={imputed}", file=sys.__stdout__)
+    if model_type == 'persistent':
+        print(f"Running with config: model_type={model_type}, num_states={num_states}, radius={radius}, imputed={imputed}", file=sys.__stdout__)
+    else:
+        print(f"Running with config: model_type={model_type}, backbone={backbone}, agg={agg}, num_states={num_states}, train_weights={train_weights_arg}, cost_matrix={cost_matrix_arg}, epochs={epochs}, radius={radius}, imputed={imputed}", file=sys.__stdout__)
 
     # prefix corresponds to model configuration
     prefix = f"{model_type}_{backbone}_{agg}_{num_states}"
@@ -187,6 +190,10 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
         val_accs = []
         val_state_accs = []
         val_briers = []
+
+        # Skip training loop if using persistent model (it has no learnable parameters)
+        if model_type == 'persistent':
+            epochs = 0
 
         for epoch in range(epochs):
 
@@ -238,14 +245,19 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
                 f"Val IoU: {val_iou.tolist()} | "
                 f"Val Brier: {val_brier:.4f}", file=sys.__stdout__)
             
-        plot_metrics(
-            train_losses, val_losses, val_briers, val_state_accs, 
-            save_dir=plots_dir, save_file=f'metrics.png'
-        )
+        # Persistent model has no training/validation metrics to plot
+        if model_type != 'persistent':
+            plot_metrics(
+                train_losses, val_losses, val_briers, val_state_accs, 
+                save_dir=plots_dir, save_file=f'metrics.png'
+            )
 
         print("\nFinal Test Evaluation")
 
-        test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate(model, test_loader, device, num_states, train_weights, cost_matrix)
+        if model_type != 'persistent':
+            test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate(model, test_loader, device, num_states, train_weights, cost_matrix)
+        else:
+            test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate_persistent(test_loader, device, num_states)
 
         print(f"Test Loss: {test_loss:.4f}")
         print(f"Test Acc: {test_overall_acc:.4f} | "
@@ -255,8 +267,12 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
               f"Test IoU: {test_iou.tolist()} | "
               f"Test Brier: {test_brier:.4f}")
 
-        preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
-        plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred')
+        if model_type != 'persistent':
+            preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
+            plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred')
+        else:
+            preds, gts, states = predict_persistent(test_loader, device)
+            plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred_persistent')
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Model configuration")
@@ -265,7 +281,7 @@ if __name__=='__main__':
         "--model_type", "--type", "--mt",
         type=str,
         default="direct",
-        help="Type of model (direct, hazard)"
+        help="Type of model (direct, hazard, persistent)"
     )
 
     parser.add_argument(
