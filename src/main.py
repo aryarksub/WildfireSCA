@@ -272,20 +272,20 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
         if model_type != 'persistent':
             preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
             plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred')
+
+            sim_preds, sim_targets, sim_accuracy, sim_state_acc, sim_precision, sim_recall, sim_iou, sim_brier = simulate(model, test_loader, device, num_states, cost_matrix)
+
+            print('\nSimulation Metrics:')
+            print(f"Sim Loss: NEED TO ADD")
+            print(f"Sim Acc: {sim_accuracy:.4f} | "
+                f"Sim State Acc: {sim_state_acc.tolist()} | "
+                f"Sim Prec: {sim_precision.tolist()} | "
+                f"Sim Rec: {sim_recall.tolist()} | "
+                f"Sim IoU: {sim_iou.tolist()} | "
+                f"Sim Brier: {sim_brier:.4f}")
         else:
             preds, gts, states = predict_persistent(test_loader, device)
             plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred_persistent')
-
-        sim_preds, sim_targets, sim_accuracy, sim_state_acc, sim_precision, sim_recall, sim_iou, sim_brier = simulate(model, test_loader, device, num_states, cost_matrix)
-
-        print('\nSimulation Metrics:')
-        print(f"Sim Loss: NEED TO ADD")
-        print(f"Sim Acc: {sim_accuracy:.4f} | "
-              f"Sim State Acc: {sim_state_acc.tolist()} | "
-              f"Sim Prec: {sim_precision.tolist()} | "
-              f"Sim Rec: {sim_recall.tolist()} | "
-              f"Sim IoU: {sim_iou.tolist()} | "
-              f"Sim Brier: {sim_brier:.4f}")
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Model configuration")
