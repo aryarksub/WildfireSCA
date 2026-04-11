@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -396,6 +398,9 @@ def predict_persistent(loader, device):
     current_states = []
 
     for batch in loader:
+        # print(batch.keys(), file=sys.__stdout__)
+        # print(batch['event_name'], file=sys.__stdout__)
+        # print(batch['t'], file=sys.__stdout__)
 
         x = batch["x_all"].to(device)
         y = batch["y"].to(device)
@@ -408,3 +413,142 @@ def predict_persistent(loader, device):
         current_states.extend(state.squeeze(1).cpu())
 
     return predictions, ground_truth, current_states
+
+
+def group_by_event(loader):
+    events = defaultdict(list)
+
+    for batch in loader:
+        B = len(batch["event_name"])
+
+        for i in range(B):
+            events[batch["event_name"][i]].append({
+                "t": batch["t"][i],
+                "x_all": batch["x_all"][i],
+                "y": batch["y"][i],
+            })
+
+    # Sort each event by time
+    for k in events:
+        events[k] = sorted(events[k], key=lambda x: x["t"])
+
+    return events
+
+@torch.no_grad()
+def simulate(model, loader, device, num_states, cost_matrix=None):
+
+    print("Running autoregressive simulation...", file=sys.__stdout__)
+
+    model.eval()
+
+    events = group_by_event(loader)
+
+    all_preds = []
+    all_targets = []
+
+    total_pixels = 0
+    correct = 0
+
+    state_correct = torch.zeros(num_states)
+    state_total = torch.zeros(num_states)
+
+    confusion = torch.zeros(num_states, num_states)
+    brier_sum = 0.0
+
+    for event_name, trajectory in events.items():
+
+        # Initialize with FIRST ground truth state
+        first = trajectory[0]
+        x = first["x_all"].unsqueeze(0).to(device)
+
+        # autoregressive state
+        state = x[:, 0:1].clone()
+
+        for step in trajectory:
+
+            x = step["x_all"].unsqueeze(0).to(device)
+            y = step["y"].to(device).long()
+
+            # Replace state with autoregressive prediction
+            x[:, 0:1] = state
+
+            # Forward pass
+            outputs = model(x)
+            if not isinstance(outputs, tuple):
+                outputs = (outputs,)
+
+            P = build_transition_probs(x, outputs, num_states)
+
+            # Prediction
+            if cost_matrix is not None:
+                C = cost_matrix.to(P.device)
+                expected_cost = (P.unsqueeze(2) * C.view(1, num_states, num_states, 1, 1)).sum(dim=1)
+                pred = torch.argmin(expected_cost, dim=1, keepdim=True)
+            else:
+                pred = torch.argmax(P, dim=1, keepdim=True)
+
+            # Move to CPU for metrics
+            y_cpu = y.squeeze(0).cpu()
+            pred_cpu = pred.squeeze(0).cpu()
+            P_cpu = P.squeeze(0).cpu()
+
+            all_preds.append(pred_cpu)
+            all_targets.append(y_cpu)
+
+            # Metrics
+            total_pixels += y_cpu.numel()
+            correct += (pred_cpu == y_cpu).sum().item()
+
+            # Per-state accuracy
+            for z in range(num_states):
+                mask = (y_cpu == z)
+                state_total[z] += mask.sum().item()
+                state_correct[z] += ((pred_cpu == y_cpu) & mask).sum().item()
+
+            # Confusion matrix
+            y_flat = y_cpu.view(-1).long()
+            pred_flat = pred_cpu.view(-1).long()
+
+            indices = num_states * y_flat + pred_flat
+            cm = torch.bincount(indices, minlength=num_states**2).reshape(num_states, num_states)
+
+            confusion += cm
+
+            # Brier score
+            y_onehot = F.one_hot(
+                y_cpu.squeeze(0), num_classes=num_states
+            ).permute(2, 0, 1).float()
+
+            brier_sum += ((P_cpu - y_onehot)**2).sum().item()
+
+            # Autoregressive step
+            state = pred.clone()
+
+    # Final Metrics
+    precision = torch.zeros(num_states)
+    recall = torch.zeros(num_states)
+    iou = torch.zeros(num_states)
+
+    for k in range(num_states):
+        TP = confusion[k, k]
+        FP = confusion[:, k].sum() - TP
+        FN = confusion[k, :].sum() - TP
+
+        precision[k] = TP / (TP + FP + 1e-8)
+        recall[k] = TP / (TP + FN + 1e-8)
+        iou[k] = TP / (TP + FP + FN + 1e-8)
+
+    accuracy = correct / total_pixels
+    state_acc = state_correct / (state_total + 1e-8)
+    brier = brier_sum / total_pixels
+
+    return (
+        all_preds,
+        all_targets,
+        accuracy,
+        state_acc,
+        precision,
+        recall,
+        iou,
+        brier
+    )

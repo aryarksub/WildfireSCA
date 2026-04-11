@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import re
 
-from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, evaluate_persistent, predict_persistent, predict_states
+from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, evaluate_persistent, predict_persistent, predict_states, simulate
 from plots import plot_metrics, plot_multiple
 from training import get_training_objects, load_config
 
@@ -156,6 +156,8 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
     config_file = os.path.join(Path(__file__).resolve().parent.parent, CONFIGS_DIR, f'configs_sca_{num_states}{"_imp" if imputed else ""}.yaml')
     plots_dir = os.path.join(PLOTS_DIR, f'{prefix}_{suffix}')
     os.makedirs(plots_dir, exist_ok=True)
+
+    print('Logging to:', log_file, file=sys.__stdout__)
     
     with open(log_file, 'w') as f:
         sys.stdout = f
@@ -273,6 +275,17 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
         else:
             preds, gts, states = predict_persistent(test_loader, device)
             plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred_persistent')
+
+        sim_preds, sim_targets, sim_accuracy, sim_state_acc, sim_precision, sim_recall, sim_iou, sim_brier = simulate(model, test_loader, device, num_states, cost_matrix)
+
+        print('\nSimulation Metrics:')
+        print(f"Sim Loss: NEED TO ADD")
+        print(f"Sim Acc: {sim_accuracy:.4f} | "
+              f"Sim State Acc: {sim_state_acc.tolist()} | "
+              f"Sim Prec: {sim_precision.tolist()} | "
+              f"Sim Rec: {sim_recall.tolist()} | "
+              f"Sim IoU: {sim_iou.tolist()} | "
+              f"Sim Brier: {sim_brier:.4f}")
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Model configuration")
