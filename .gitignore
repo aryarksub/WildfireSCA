@@ -5,6 +5,9 @@ temp_cubes/
 plots/
 results/
 
+# Temporary directories and files
+*temp*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 import rasterio
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_dilation, distance_transform_edt
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -315,8 +315,69 @@ class GeoTiffDatasetStructured(Dataset):
         batch["variables"][var_key] = var_entry
         batch["categories"].setdefault("fire_spread", {})["burned_state"] = var_entry
 
-        # Create burned_state_combined which is 0 for unburned, 1 for burning+burned
+        # Create burned_state_combined which is 0 for unburned, 1 for burned through
         burned_combined = (burned > 0).float()
+
+        var_key_combined = "fire_spread/burned_state_combined"
+        var_entry_combined = {
+            "var_name": "burned_state_combined",
+            "category": "fire_spread",
+            "data": burned_combined,
+            "shape": tuple(burned_combined.shape),
+            "files": [],
+        }
+
+        batch["variables"][var_key_combined] = var_entry_combined
+        batch["categories"].setdefault("fire_spread", {})["burned_state_combined"] = var_entry_combined
+
+    def _add_burned_state_v2(self, batch):
+        vars_all = batch["variables"]
+
+        required = [
+            "fire_spread/fperim",
+        ]
+
+        if not all(k in vars_all for k in required):
+            return  # Cannot build burned state
+
+        fperim = vars_all["fire_spread/fperim"]["data"]
+
+        T, H, W = fperim.shape
+        D = torch.full((H, W), -np.inf)
+
+        structure = np.ones((3, 3))  # Moore neighborhood
+
+        for t in range(T-1, 0, -1):
+            diff = (fperim[t] == 1) & (fperim[t - 1] == 0)
+
+            U = binary_dilation(diff, structure=structure)
+
+            D[U] = np.maximum(D[U], t)
+
+        states = torch.zeros_like(fperim, dtype=torch.float32)
+        states[T-1][fperim[T-1] == 1] = 2
+
+        for t in range(T-1):
+            burning = fperim[t] == 1
+            states[t][burning & (t < D)] = 1
+            states[t][burning & ~(t < D)] = 2
+        #     print(f"t={t}, burning count={(burning).sum().item()}, state 0 count={(states[t] == 0).sum().item()}, state 1 count={(states[t] == 1).sum().item()}, state 2 count={(states[t] == 2).sum().item()}", file=sys.__stdout__)
+        # print(f"t={T-1}, burning count={(fperim[T-1] == 1).sum().item()}, state 0 count={(states[T-1] == 0).sum().item()}, state 1 count={(states[T-1] == 1).sum().item()}, state 2 count={(states[T-1] == 2).sum().item()}", file=sys.__stdout__)
+
+        var_key = "fire_spread/burned_state"
+        var_entry = {
+            "var_name": "burned_state",
+            "category": "fire_spread",
+            "data": states,
+            "shape": tuple(states.shape),
+            "files": [],
+        }
+
+        batch["variables"][var_key] = var_entry
+        batch["categories"].setdefault("fire_spread", {})["burned_state"] = var_entry
+
+        # Create burned_state_combined which is 0 for unburned, 1 for burned
+        burned_combined = (states > 0).float()
 
         var_key_combined = "fire_spread/burned_state_combined"
         var_entry_combined = {
@@ -646,7 +707,8 @@ class GeoTiffDatasetStructured(Dataset):
                 batch["variables"][var_key] = var_entry
                 batch["categories"].setdefault(category_dir, {})[var_name] = var_entry
 
-        self._add_burned_state(batch)
+        # self._add_burned_state(batch)
+        self._add_burned_state_v2(batch)
         self._add_burned_state_imputed(batch)
         # for vk in batch["variables"]:
         #     print(vk, batch["variables"][vk]["shape"], file=sys.__stdout__)
