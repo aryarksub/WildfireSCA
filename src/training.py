@@ -49,7 +49,7 @@ def hardcoded_split(dataset, forced_test_ids=None):
     indices = list(range(n))
     event_by_idx = {i: _dataset_event_name(dataset, i) for i in indices}
 
-    test_idx = [i for i in indices if event_by_idx[i] in forced]
+    forced_test_idx = [i for i in indices if event_by_idx[i] in forced]
     remaining = [i for i in indices if event_by_idx[i] not in forced]
 
     remaining_events = sorted({event_by_idx[i] for i in remaining})
@@ -72,7 +72,8 @@ def hardcoded_split(dataset, forced_test_ids=None):
 
     train_idx = [i for i in indices if event_by_idx[i] in train_events]
     val_idx   = [i for i in indices if event_by_idx[i] in val_events]
-    test_idx  = [i for i in indices if event_by_idx[i] in test_events]
+    random_test_idx  = [i for i in indices if event_by_idx[i] in test_events]
+    test_idx = sorted(forced_test_idx + random_test_idx)
 
     return train_idx, val_idx, test_idx
 
