@@ -4,6 +4,7 @@ temp_cubes/
 # Plots and results
 plots/
 results/
+old_results/
 
 # Temporary directories and files
 *temp*

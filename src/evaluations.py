@@ -552,3 +552,165 @@ def simulate(model, loader, device, num_states, cost_matrix=None):
         iou,
         brier
     )
+
+@torch.no_grad()
+def simulate_probabilistic(model, loader, device, num_states, cost_matrix=None):
+
+    print("Running probabilistic autoregressive simulation...", file=sys.__stdout__)
+
+    model.eval()
+    events = group_by_event(loader)
+
+    all_preds = []
+    all_targets = []
+
+    total_pixels = 0
+    correct = 0
+
+    state_correct = torch.zeros(num_states)
+    state_total = torch.zeros(num_states)
+
+    confusion = torch.zeros(num_states, num_states)
+    brier_sum = 0.0
+
+    for event_name, trajectory in events.items():
+
+        print(f"Simulating prob for {event_name}", file=sys.__stdout__)
+
+        # --- Initialize belief with first ground truth ---
+        start_index = 0 # if len(trajectory) == 1 else 1
+        first = trajectory[start_index]
+        x = first["x_all"].unsqueeze(0).to(device)
+
+        state0 = x[:, 0:1].long()
+        pi = F.one_hot(
+            state0.squeeze(1), num_classes=num_states
+        ).permute(0, 3, 1, 2).float()  # (B, K, H, W)
+
+        for step in trajectory[start_index:]:
+
+            x = step["x_all"].unsqueeze(0).to(device)
+            y = step["y"].to(device).long()
+
+            # print(f'Time {step["t"]}: X/Y sums = {x[:,0:1].sum(), y.sum()}', file=sys.__stdout__)
+
+            # --- Feed expected state into model (minimal-change version) ---
+            expected_state = (
+                pi * torch.arange(num_states, device=pi.device).view(1, -1, 1, 1)
+            ).sum(dim=1, keepdim=True)
+
+            x[:, 0:1] = expected_state
+
+            # print(f'Time {step["t"]}: Exp sum = {x[:,0:1].sum()}', file=sys.__stdout__)
+
+            # --- Forward pass ---
+            outputs = model(x)
+            if not isinstance(outputs, tuple):
+                outputs = (outputs,)
+
+            # --- Build full transition tensor T ---
+            B, _, H, W = pi.shape
+            T = torch.zeros(B, num_states, num_states, H, W, device=device)
+
+            if num_states == 2:
+                (p_UB,) = outputs
+
+                # From U (0)
+                T[:, 0, 0] = 1 - p_UB
+                T[:, 0, 1] = p_UB
+
+                # From B (1)
+                T[:, 1, 1] = 1.0
+
+            elif num_states == 3:
+                p_UU, p_UB, p_UE, p_BE = outputs
+
+                # From U (0)
+                T[:, 0, 0] = p_UU
+                T[:, 0, 1] = p_UB
+                T[:, 0, 2] = p_UE
+
+                # From B (1)
+                T[:, 1, 1] = 1 - p_BE
+                T[:, 1, 2] = p_BE
+
+                # From E (2)
+                T[:, 2, 2] = 1.0
+
+            else:
+                raise ValueError(f"Unsupported num_states={num_states}")
+
+            # --- Propagate belief ---
+            # pi_next(z') = sum_z pi(z) * P(z' | z)
+            pi = (pi.unsqueeze(2) * T).sum(dim=1)
+
+            # --- Prediction for metrics ---
+            if cost_matrix is not None:
+                C = cost_matrix.to(pi.device)
+                expected_cost = (pi.unsqueeze(2) * C.view(1, num_states, num_states, 1, 1)).sum(dim=1)
+                pred = torch.argmin(expected_cost, dim=1, keepdim=True)
+            else:
+                pred = torch.argmax(pi, dim=1, keepdim=True)
+
+            # print(f'Time {step["t"]}: Pred sum = {pred.sum()}', file=sys.__stdout__)
+
+            # --- Move to CPU ---
+            y_cpu = y.squeeze(0).cpu()
+            pred_cpu = pred.squeeze(0).cpu()
+            pi_cpu = pi.squeeze(0).cpu()
+
+            all_preds.append(pred_cpu)
+            all_targets.append(y_cpu)
+
+            # --- Metrics ---
+            total_pixels += y_cpu.numel()
+            correct += (pred_cpu == y_cpu).sum().item()
+
+            for z in range(num_states):
+                mask = (y_cpu == z)
+                state_total[z] += mask.sum().item()
+                state_correct[z] += ((pred_cpu == y_cpu) & mask).sum().item()
+
+            # Confusion matrix
+            y_flat = y_cpu.view(-1).long()
+            pred_flat = pred_cpu.view(-1).long()
+
+            indices = num_states * y_flat + pred_flat
+            cm = torch.bincount(indices, minlength=num_states**2).reshape(num_states, num_states)
+            confusion += cm
+
+            # --- Brier score (using pi instead of P) ---
+            y_onehot = F.one_hot(
+                y_cpu.squeeze(0), num_classes=num_states
+            ).permute(2, 0, 1).float()
+
+            brier_sum += ((pi_cpu - y_onehot)**2).sum().item()
+
+    # --- Final metrics ---
+    precision = torch.zeros(num_states)
+    recall = torch.zeros(num_states)
+    iou = torch.zeros(num_states)
+
+    for k in range(num_states):
+        TP = confusion[k, k]
+        FP = confusion[:, k].sum() - TP
+        FN = confusion[k, :].sum() - TP
+
+        precision[k] = TP / (TP + FP + 1e-8)
+        recall[k] = TP / (TP + FN + 1e-8)
+        iou[k] = TP / (TP + FP + FN + 1e-8)
+
+    accuracy = correct / total_pixels
+    state_acc = state_correct / (state_total + 1e-8)
+    brier = brier_sum / total_pixels
+
+    return (
+        all_preds,
+        all_targets,
+        accuracy,
+        state_acc,
+        precision,
+        recall,
+        iou,
+        brier
+    )

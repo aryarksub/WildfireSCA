@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import re
 
-from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, evaluate_persistent, predict_persistent, predict_states, simulate
+from evaluations import compute_loss_three_state, compute_loss_two_state, evaluate, evaluate_persistent, predict_persistent, predict_states, simulate, simulate_probabilistic
 from plots import plot_metrics, plot_multiple
 from training import get_training_objects, load_config
 
@@ -273,16 +273,27 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
             preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
             plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred')
 
-            sim_preds, sim_targets, sim_accuracy, sim_state_acc, sim_precision, sim_recall, sim_iou, sim_brier = simulate(model, test_loader, device, num_states, cost_matrix)
+            # sim_preds, sim_targets, sim_accuracy, sim_state_acc, sim_precision, sim_recall, sim_iou, sim_brier = simulate(model, test_loader, device, num_states, cost_matrix)
 
-            print('\nSimulation Metrics:')
-            print(f"Sim Loss: NEED TO ADD")
-            print(f"Sim Acc: {sim_accuracy:.4f} | "
-                f"Sim State Acc: {sim_state_acc.tolist()} | "
-                f"Sim Prec: {sim_precision.tolist()} | "
-                f"Sim Rec: {sim_recall.tolist()} | "
-                f"Sim IoU: {sim_iou.tolist()} | "
-                f"Sim Brier: {sim_brier:.4f}")
+            # print('\nSimulation Metrics:')
+            # print(f"Sim Acc: {sim_accuracy:.4f} | "
+            #     f"Sim State Acc: {sim_state_acc.tolist()} | "
+            #     f"Sim Prec: {sim_precision.tolist()} | "
+            #     f"Sim Rec: {sim_recall.tolist()} | "
+            #     f"Sim IoU: {sim_iou.tolist()} | "
+            #     f"Sim Brier: {sim_brier:.4f}")
+            
+            # (sim_prob_preds, sim_prob_targets, sim_prob_accuracy, 
+            #  sim_prob_state_acc, sim_prob_precision, sim_prob_recall, 
+            #  sim_prob_iou, sim_prob_brier) = simulate_probabilistic(model, test_loader, device, num_states, cost_matrix)
+
+            # print('\nSimulation (Probabilistic) Metrics:')
+            # print(f"Sim (Prob) Acc: {sim_prob_accuracy:.4f} | "
+            #     f"Sim (Prob) State Acc: {sim_prob_state_acc.tolist()} | "
+            #     f"Sim (Prob) Prec: {sim_prob_precision.tolist()} | "
+            #     f"Sim (Prob) Rec: {sim_prob_recall.tolist()} | "
+            #     f"Sim (Prob) IoU: {sim_prob_iou.tolist()} | "
+            #     f"Sim (Prob) Brier: {sim_prob_brier:.4f}")
         else:
             preds, gts, states = predict_persistent(test_loader, device)
             plot_multiple(states, gts, preds, n=10, save_dir=plots_dir, save_name='pred_persistent')
@@ -298,7 +309,7 @@ if __name__=='__main__':
     )
 
     parser.add_argument(
-        "--backbone",
+        "--backbone", "--bb",
         type=str,
         default="logistic",
         help="Backbone model (logistic, mlp)"
