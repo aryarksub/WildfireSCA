@@ -787,9 +787,11 @@ class OneStepDatasetSimple(Dataset):
             return "concat"
         if mode == "mean":
             return "mean"
+        if mode == "current":
+            return "current"
         raise ValueError(
             f"Unsupported hourly_agg={self.hourly_agg!r}. "
-            "Use one of: mean or concat."
+            "Use one of: mean or concat or current."
         )
 
     def _canonical_landfire_var(self, var_name: str) -> str:
@@ -912,10 +914,13 @@ class OneStepDatasetSimple(Dataset):
         x_fire = torch.stack(fire_frames, dim=0)
 
         hourly_frames = []
-        time_window = list(range(max(0, t - self.step + 1), t + 1))
-        if len(time_window) < self.step:
-            pad_val = time_window[0] if time_window else 0
-            time_window = [pad_val] * (self.step - len(time_window)) + time_window
+        if hourly_mode == "current":
+            time_window = [t]
+        else:
+            time_window = list(range(max(0, t - self.step + 1), t + 1))
+            if len(time_window) < self.step:
+                pad_val = time_window[0] if time_window else 0
+                time_window = [pad_val] * (self.step - len(time_window)) + time_window
         for k in self.hourly_vars:
             if k not in vars_all:
                 if hourly_mode == "mean":
@@ -944,6 +949,8 @@ class OneStepDatasetSimple(Dataset):
             frames = torch.stack(frames, dim=0)
             if hourly_mode == "mean":
                 frames = frames.mean(dim=0)
+            elif hourly_mode == "current":
+                frames = frames[0]
             elif hourly_mode != "concat":
                 raise ValueError("Unsupported hourly_agg")
             hourly_frames.append(frames)

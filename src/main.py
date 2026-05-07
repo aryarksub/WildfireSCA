@@ -319,7 +319,7 @@ if __name__=='__main__':
         "--agg",
         type=str,
         default="concat",
-        help="Aggregation method (concat, mean)"
+        help="Aggregation method (concat, mean, current)"
     )
 
     parser.add_argument(
