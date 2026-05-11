@@ -18,7 +18,6 @@ data:
   stats_sample_limit: null
   required_vars:
     - fire_spread/burned_state_combined
-    - fuel_topo/adj
     - fuel_topo/cbd
     - fuel_topo/cbh
     - fuel_topo/cc

@@ -925,6 +925,8 @@ class OneStepDatasetSimple(Dataset):
             if k not in vars_all:
                 if hourly_mode == "mean":
                     frames = torch.full(target_size, self.missing_value)
+                elif hourly_mode == "current":
+                    frames = torch.full(target_size, self.missing_value)
                 elif hourly_mode == "concat":
                     frames = torch.full((len(time_window), *target_size), self.missing_value)
                 else:
