@@ -31,6 +31,7 @@ class DirectLogisticSCA(nn.Module):
     def __init__(self, n_covariates, num_states=3, radius=1):
         super().__init__()
 
+        self.n_covariates = n_covariates
         self.num_states = num_states
         self.radius = radius
 

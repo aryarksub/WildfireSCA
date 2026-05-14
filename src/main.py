@@ -39,6 +39,34 @@ def parse_train_weights(arg, num_states, train_loader=None):
             clamp = True
             alpha = 0.5
 
+        # Use computed weights from earlier instead of re-computing
+        # if num_states == 3:
+        #     weights = torch.tensor(
+        #         [
+        #             [0.1000000, 1.7662051, 1.3098712], 
+        #             [0.0000000, 0.9698303, 1.7662051], 
+        #             [0.0000000, 0.0000000, 0.1503550]
+        #         ]
+        #     )
+        #     # [UU, UB, UE, BB, BE]
+        #     return [
+        #         weights[0,0].item(),
+        #         weights[0,1].item(),
+        #         weights[0,2].item(),
+        #         weights[1,1].item(),
+        #         weights[1,2].item()
+        #     ]
+        # elif num_states == 2:
+        #     weights = torch.tensor(
+        #         [
+        #             [0.1000000, 2.5508590], [0.0000000, 0.3589631]
+        #         ]
+        #     )
+        #     return [
+        #         weights[0,0].item(),
+        #         weights[0,1].item()
+        #     ] 
+
         freq = torch.zeros(num_states, num_states, dtype=torch.long)
 
         for batch in train_loader:
@@ -122,17 +150,29 @@ def parse_cost_matrix(arg, num_states):
     if arg == "default" or arg == "wildfire":
         if num_states == 3:
             return torch.tensor([
-                [0, 2, 1],  # true U: predicting U is 0 cost, B is worst (2), E is bad (1)
+                [0, 20, 15],  # true U: predicting U is 0 cost, B is worst (20), E is bad (15)
                 [50, 0, 35], # true B: predicting B is 0 cost, U is worst (50), E is bad (35)
                 [5, 2, 0]   # true E: predicting E is 0 cost, U is worst (5), B is bad (2)
             ]).float()
         elif num_states == 2:
             return torch.tensor([
-                [0, 1], # true U: predicting U is 0 cost, B is bad (1)
+                [0, 4], # true U: predicting U is 0 cost, B is bad (4)
                 [5, 0]  # true B: predicting B is 0 cost, U is bad (5)
             ]).float()
 
     raise ValueError(f"Unknown cost_matrix option: {arg}")
+
+def get_model_short_name(mt, bb, agg, ns, tw, cm, imp):
+    weights_and_costs = f"{'u' if tw == 'equal' else 'i'}{'u' if cm == 'uniform' else 'w'}"
+    model = f"{'d' if mt == 'direct' else 'h'}{'l' if bb == 'logistic' else 'm'}"
+    if agg == 'concat':
+        covariates = 'seq'
+    elif agg == 'current':
+        covariates = 'single'
+    else:
+        covariates = 'mean'
+    delta_t = 1 if imp else 12
+    return f'{weights_and_costs}_{model}({ns})_{covariates}_{delta_t}'
 
 def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix_arg, epochs, radius, imputed):
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -158,6 +198,11 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
     os.makedirs(plots_dir, exist_ok=True)
 
     print('Logging to:', log_file, file=sys.__stdout__)
+
+    model_name = get_model_short_name(
+        mt=model_type, bb=backbone, agg=agg, ns=num_states,
+        tw=train_weights_arg, cm=cost_matrix_arg, imp=imputed
+    )
     
     with open(log_file, 'w') as f:
         sys.stdout = f
@@ -268,6 +313,19 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
               f"Test Rec: {test_rec.tolist()} | "
               f"Test IoU: {test_iou.tolist()} | "
               f"Test Brier: {test_brier:.4f}")
+    
+        save_path = os.path.join('results', f"{model_name}.pt")
+        print(f"Saving model to {save_path}", file=sys.__stdout__)
+
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "n_covariates": model.n_covariates,
+            "num_states": num_states,
+            "radius": model.radius,
+            "agg": agg,
+            "epoch": epoch,
+        }, save_path)
 
         if model_type != 'persistent':
             preds, gts, states = predict_states(model, test_loader, device, num_states, cost_matrix)
