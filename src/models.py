@@ -135,6 +135,7 @@ class HazardLogisticSCA(nn.Module):
     def __init__(self, n_covariates, num_static, num_states=3, T=12, radius=1):
         super().__init__()
 
+        self.n_covariates = n_covariates
         self.num_states = num_states
         self.T = T  # number of hourly steps
         self.num_static = num_static # number of static variables/layers
@@ -312,6 +313,7 @@ class HazardLogisticSCA(nn.Module):
 class MLPSCA(nn.Module):
     def __init__(self, n_covariates, hidden_dim=32, num_states=3, radius=1):
         super().__init__()
+        self.n_covariates = n_covariates
         self.num_states = num_states
         self.radius = radius
 
@@ -398,6 +400,7 @@ class HazardMLPSCA(nn.Module):
     def __init__(self, n_covariates, num_static, hidden_dim=32, num_states=3, T=12, radius=1):
         super().__init__()
 
+        self.n_covariates = n_covariates
         self.num_states = num_states
         self.T = T
         self.num_static = num_static
