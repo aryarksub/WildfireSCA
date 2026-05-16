@@ -269,7 +269,7 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
             print(f"Epoch {epoch+1:02d} | "
                 f"Train Loss: {avg_train_loss:.4f}")
 
-            val_loss, val_overall_acc, val_state_acc, val_prec, val_rec, val_iou, val_brier = evaluate(model, val_loader, device, num_states, train_weights, cost_matrix)
+            val_loss, val_overall_acc, val_state_acc, val_prec, val_rec, val_iou, val_brier, val_cost, val_avg_cost = evaluate(model, val_loader, device, num_states, train_weights, cost_matrix)
             val_losses.append(val_loss)
             val_accs.append(val_overall_acc)
             val_state_accs.append(val_state_acc)
@@ -302,17 +302,19 @@ def driver(model_type, backbone, agg, num_states, train_weights_arg, cost_matrix
         print("\nFinal Test Evaluation")
 
         if model_type != 'persistent':
-            test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate(model, test_loader, device, num_states, train_weights, cost_matrix)
+            test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier, test_cost, test_avg_cost = evaluate(model, test_loader, device, num_states, train_weights, cost_matrix)
         else:
             test_loss, test_overall_acc, test_state_acc, test_prec, test_rec, test_iou, test_brier = evaluate_persistent(test_loader, device, num_states)
 
         print(f"Test Loss: {test_loss:.4f}")
-        print(f"Test Acc: {test_overall_acc:.4f} | "
-              f"Test State Acc: {test_state_acc.tolist()} | "
-              f"Test Prec: {test_prec.tolist()} | "
-              f"Test Rec: {test_rec.tolist()} | "
-              f"Test IoU: {test_iou.tolist()} | "
-              f"Test Brier: {test_brier:.4f}")
+        print(f"Test Acc: {test_overall_acc:.4f}\n"
+              f"Test State Acc: {test_state_acc.tolist()}\n"
+              f"Test Prec: {test_prec.tolist()}\n"
+              f"Test Rec: {test_rec.tolist()}\n"
+              f"Test IoU: {test_iou.tolist()}\n"
+              f"Test Brier: {test_brier:.4f}\n"
+              f"Test Cost: {test_cost:.4f}\n"
+              f"Test Avg Cost: {test_avg_cost:.4f}")
     
         save_path = os.path.join('results', f"{model_name}.pt")
         print(f"Saving model to {save_path}", file=sys.__stdout__)

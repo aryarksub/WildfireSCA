@@ -156,6 +156,9 @@ def evaluate(model, loader, device, num_states, train_weights=None, cost_matrix=
     # Brier score accumulator
     brier_sum = 0.0
 
+    # Total cost (for cost-sensitive learning, using cost matrix)
+    tot_cost = 0
+
     loss_fn = compute_loss_three_state if num_states == 3 else compute_loss_two_state
 
     for batch in loader:
@@ -181,6 +184,11 @@ def evaluate(model, loader, device, num_states, train_weights=None, cost_matrix=
             expected_cost = (P_exp * C_exp).sum(dim=1)  # (B,K,H,W)
 
             pred = torch.argmin(expected_cost, dim=1, keepdim=True)
+
+            y_true = y.squeeze(1)
+            y_pred = pred.squeeze(1)
+            realized_cost = C[y_true, y_pred]
+            tot_cost += realized_cost.sum().item()
         else:
             pred = torch.argmax(P, dim=1, keepdim=True)
 
@@ -245,7 +253,9 @@ def evaluate(model, loader, device, num_states, train_weights=None, cost_matrix=
         precision,
         recall,
         iou,
-        brier
+        brier,
+        tot_cost,
+        tot_cost / total_pixels
     )
 
 @torch.no_grad()
